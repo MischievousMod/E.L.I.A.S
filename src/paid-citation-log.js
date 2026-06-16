@@ -4,8 +4,10 @@ import {
   splitDateAndTime,
 } from "./format.js";
 import {
+  isManualOutstandingCitation,
   parseOutstandingCitationFromMessage,
 } from "./citation-log.js";
+import { resolveOfficerNameFromAuthor } from "./registry.js";
 import { buildOfficialLogPayload, LOG_EMBED_COLOR } from "./log-render.js";
 
 export const PAID_FOOTER = "Issued by the Ethics Committee - Citation archive";
@@ -36,8 +38,18 @@ export function mergeCitationRecord({
   };
 }
 
-export function parseCitationFromDiscordMessage(message) {
-  return parseOutstandingCitationFromMessage(message);
+export async function parseCitationFromDiscordMessage(message) {
+  const parsed = parseOutstandingCitationFromMessage(message);
+
+  if (!parsed) {
+    return parsed;
+  }
+
+  if (isManualOutstandingCitation(message) && !parsed.officer) {
+    parsed.officer = await resolveOfficerNameFromAuthor(message);
+  }
+
+  return parsed;
 }
 
 export function buildPaidCitationReply({

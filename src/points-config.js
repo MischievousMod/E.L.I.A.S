@@ -1,3 +1,5 @@
+import { POINTS_CHANNEL_COLUMNS as CHANNEL_POINTS_COLUMNS } from "./channels.js";
+
 /** Configuration for the button-authorized points system. */
 
 /** Separate spreadsheet that holds the points. Override with POINTS_SPREADSHEET_ID on Railway. */
@@ -39,15 +41,7 @@ export const POINTS_RESET_TIMEZONE =
  *   E citations | F interviews | G spectates | H investigations |
  *   I sentences | J seminars | K monthly jobs (all types combined)
  */
-export const POINTS_CHANNEL_COLUMNS = {
-  "1511598741478441002": "E", // #citations (paid citation log)
-  "1511806603521822800": "F", // #interview
-  "1511806517228077237": "G", // #spectator
-  // "<investigations channel id>": "H", // future command
-  "1511806847634374837": "I", // outstanding citation sentences
-  "1511806370972831825": "I", // class-e sentences
-  "1511857029377949826": "J", // #seminar
-};
+export const POINTS_CHANNEL_COLUMNS = CHANNEL_POINTS_COLUMNS;
 
 /** Friendly label for each points column (used in confirmation DMs). */
 export const POINTS_COLUMN_LABELS = {

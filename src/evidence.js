@@ -1,4 +1,3 @@
-import { fetch } from "undici";
 import {
   classifyAttachment,
   classifyEvidenceUrl,
@@ -71,9 +70,18 @@ export function evidenceUrlDedupeKey(url) {
 
 /** Pull every http(s) URL out of free text (supports multiple links in one field). */
 export function parseUrlsFromText(text) {
-  const matches = String(text ?? "").match(/https?:\/\/[^\s<>,]+/gi) ?? [];
+  const raw = String(text ?? "");
+  const urls = [];
 
-  return matches.map((url) => url.replace(/[.,;:!?)>\]]+$/, ""));
+  for (const part of raw.split(/(?=https?:\/\/)/i).filter(Boolean)) {
+    const matches = part.match(/https?:\/\/[^\s<>,]+/gi) ?? [];
+
+    for (const url of matches) {
+      urls.push(url.replace(/[.,;:!?)>\]]+$/, ""));
+    }
+  }
+
+  return [...new Set(urls)];
 }
 
 /** Default single-file attachment option on slash commands. */

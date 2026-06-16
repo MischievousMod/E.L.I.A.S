@@ -57,16 +57,27 @@ function getStore() {
 
 function persist() {
   const dir = path.dirname(REGISTRY_FILE);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(REGISTRY_FILE, `${JSON.stringify(getStore(), null, 2)}\n`);
+  const tempFile = `${REGISTRY_FILE}.tmp`;
+
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(tempFile, `${JSON.stringify(getStore(), null, 2)}\n`);
+    fs.renameSync(tempFile, REGISTRY_FILE);
+  } catch (err) {
+    console.error("Could not persist registry file:", err.message);
+    throw new Error(`Could not save registry: ${err.message}`);
+  }
 }
 
 /** Discord display name when the user has not registered. */
 export function discordDisplayName(interaction) {
+  return discordDisplayNameFromUser(interaction.user, interaction.member);
+}
+
+/** Display name for a Discord user (or message author) without a slash interaction. */
+export function discordDisplayNameFromUser(user, member = null) {
   return (
-    interaction.member?.displayName ??
-    interaction.user.globalName ??
-    interaction.user.username
+    member?.displayName ?? user?.globalName ?? user?.username ?? ""
   );
 }
 
@@ -74,6 +85,14 @@ export function discordDisplayName(interaction) {
 export async function resolveOfficerName(interaction) {
   const registered = await getRegisteredUsername(interaction.user.id);
   return registered || discordDisplayName(interaction);
+}
+
+/** Executor name for a manually posted citation (registry username, else display name). */
+export async function resolveOfficerNameFromAuthor(message) {
+  const registered = await getRegisteredUsername(message.author?.id);
+  return (
+    registered || discordDisplayNameFromUser(message.author, message.member)
+  );
 }
 
 export async function getRegisteredUsername(userId) {

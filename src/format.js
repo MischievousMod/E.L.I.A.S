@@ -30,6 +30,21 @@ export function normalizeInput(value) {
     .trim();
 }
 
+/** Case-insensitive key for citation username matching in Discord logs. */
+export function normalizeUsernameKey(value) {
+  return normalizeInput(value).toLowerCase();
+}
+
+/** Case-insensitive key for officer/offender rows on spreadsheets and points. */
+export function normalizeOfficerKey(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/^@+/, "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
 /** Escape only what would break Discord code blocks in the UI. */
 export function sanitizeForDisplay(value) {
   return normalizeInput(value).replace(/```/g, "'''");

@@ -50,17 +50,16 @@ import { buildCeSentenceReply } from "./ce-sentence-log.js";
 import {
   buildCitationErrorReply,
   buildOutstandingCitationReply,
-  deleteCitationLogMessages,
   findCitationLogMessages,
-  isOutstandingCitationLog,
-  messageText,
-  extractCitationUsername,
 } from "./citation-log.js";
+import {
+  deleteGatheredCitationLogs,
+  gatherCitationLogMessages,
+} from "./citation-gather.js";
 import {
   evidenceFromCommandOptions,
   extractCitationImagesFromMessage,
   extractCitationLinksFromMessage,
-  extractEvidenceFromCitationMessages,
   materializeEvidenceForUpload,
   itemFromAttachment,
   mergeEvidenceItems,
@@ -73,11 +72,11 @@ import {
   sanitizeForDisplay,
   splitDateAndTime,
 } from "./format.js";
+import { fetchDiscordMessage } from "./discord-message.js";
 import {
-  fetchDiscordMessage,
-  parseDiscordMessageUrl,
-  resolveDiscordMessageUrl,
-} from "./discord-message.js";
+  clearDeferredReply,
+  replyEphemeral,
+} from "./interaction-helpers.js";
 import {
   buildPaidCitationReply,
   mergeCitationRecord,
@@ -127,15 +126,6 @@ const REGISTER_MODAL_ID = "register_modal";
 /** Commands usable without being in the registry. */
 const OPEN_COMMANDS = new Set(["register", "help"]);
 
-/** Reply privately to a validation/early-return error (keeps channels clean). */
-async function replyEphemeral(interaction, content) {
-  try {
-    await interaction.reply({ content, flags: MessageFlags.Ephemeral });
-  } catch (err) {
-    console.error("Could not send validation reply:", err.message);
-  }
-}
-
 function buildDiscordMessageLink(interaction, message) {
   const channelId = message.channelId;
   const messageId = message.id;
@@ -161,167 +151,6 @@ function buildSubmissionValues(interaction) {
   }
 
   return fieldDefinitions.map((field) => valuesByName[field.name] ?? "");
-}
-
-async function deleteCitationDiscordMessage(client, messageLink) {
-  try {
-    const message = await fetchDiscordMessage(client, messageLink);
-    await message.delete();
-    return { deleted: true, messageId: message.id };
-  } catch (err) {
-    return { deleted: false, reason: err.message };
-  }
-}
-
-async function collectChannelsToSearch(client, interaction, messageLink) {
-  const channels = [];
-
-  if (interaction.channel?.isTextBased()) {
-    channels.push(interaction.channel);
-  }
-
-  const parsed = parseDiscordMessageUrl(resolveDiscordMessageUrl(messageLink));
-
-  if (parsed) {
-    try {
-      const linkChannel = await client.channels.fetch(parsed.channelId);
-
-      if (
-        linkChannel?.isTextBased() &&
-        !channels.some((ch) => ch.id === linkChannel.id)
-      ) {
-        channels.push(linkChannel);
-      }
-    } catch (err) {
-      console.warn("Could not open citation link channel:", err.message);
-    }
-  }
-
-  return channels;
-}
-
-function normalizeUsernameMatch(value) {
-  return normalizeInput(value).toLowerCase();
-}
-
-async function gatherCitationLogMessages(
-  client,
-  interaction,
-  username,
-  messageLinks = []
-) {
-  const botUserId = client.user.id;
-  const target = normalizeUsernameMatch(username);
-  const found = [];
-  const seen = new Set();
-  const links = (Array.isArray(messageLinks) ? messageLinks : [messageLinks])
-    .map((link) => resolveDiscordMessageUrl(link))
-    .filter(Boolean);
-
-  const tryAdd = (message) => {
-    if (!message || seen.has(message.id)) {
-      return;
-    }
-
-    if (!isOutstandingCitationLog(message, botUserId)) {
-      return;
-    }
-
-    const parsed = parseCitationFromDiscordMessage(message);
-    const cited =
-      parsed?.offender || extractCitationUsername(messageText(message));
-
-    if (normalizeUsernameMatch(cited) !== target) {
-      return;
-    }
-
-    seen.add(message.id);
-    found.push(message);
-  };
-
-  for (const messageLink of links) {
-    try {
-      const message = await fetchDiscordMessage(client, messageLink);
-      tryAdd(message);
-    } catch (err) {
-      console.warn("Could not fetch citation link message:", err.message);
-    }
-  }
-
-  const channels = await collectChannelsToSearch(
-    client,
-    interaction,
-    links[0] ?? ""
-  );
-
-  if (interaction.guild) {
-    const outstandingChannel = await resolveOutstandingCitationsChannel(
-      interaction.guild
-    );
-
-    if (
-      outstandingChannel?.isTextBased() &&
-      !channels.some((channel) => channel.id === outstandingChannel.id)
-    ) {
-      channels.push(outstandingChannel);
-    }
-  }
-
-  for (const channel of channels) {
-    const logs = await findCitationLogMessages(channel, username, botUserId);
-
-    for (const message of logs) {
-      tryAdd(message);
-    }
-  }
-
-  return found;
-}
-
-async function deleteGatheredCitationLogs(client, messageLinks, messages) {
-  const links = (Array.isArray(messageLinks) ? messageLinks : [messageLinks])
-    .map((link) => String(link ?? "").trim())
-    .filter(Boolean);
-  const skipIds = new Set();
-  let deletedCount = 0;
-
-  for (const messageLink of links) {
-    const linkResult = await deleteCitationDiscordMessage(client, messageLink);
-
-    if (linkResult.deleted && linkResult.messageId) {
-      skipIds.add(linkResult.messageId);
-      deletedCount++;
-    }
-  }
-
-  const toDelete = messages.filter((msg) => !skipIds.has(msg.id));
-
-  if (toDelete.length) {
-    const { deleted, failed } = await deleteCitationLogMessages(toDelete);
-    deletedCount += deleted.length;
-
-    for (const entry of failed) {
-      console.warn(
-        `Could not delete citation log ${entry.id}:`,
-        entry.reason
-      );
-    }
-  }
-
-  return deletedCount;
-}
-
-async function postPaidCitationToChannel(client, guild, payload) {
-  const channel = await resolveCitationsChannel(guild);
-
-  if (!channel) {
-    throw new Error(
-      "Could not find #citations. Create that channel or set CITATIONS_CHANNEL_ID in .env."
-    );
-  }
-
-  await channel.send(payload);
-  return channel;
 }
 
 function screenshotFromDeleteCommand(interaction) {
@@ -435,7 +264,7 @@ async function handleOutstandingSentences(interaction) {
 
     for (let i = 0; i < citationMessages.length; i++) {
       const sourceMessage = citationMessages[i];
-      const parsed = parseCitationFromDiscordMessage(sourceMessage);
+      const parsed = await parseCitationFromDiscordMessage(sourceMessage);
       const sentenceData = sentenceDataFromOutstandingCitation(
         parsed,
         username
@@ -464,7 +293,7 @@ async function handleOutstandingSentences(interaction) {
       checkboxResult = await markSentenceCheckboxesForOffender(
         sheetName,
         sentenceDataFromOutstandingCitation(
-          parseCitationFromDiscordMessage(citationMessages[0]),
+          await parseCitationFromDiscordMessage(citationMessages[0]),
           username
         ).offender
       );
@@ -515,14 +344,6 @@ async function handleOutstandingSentences(interaction) {
     } catch (replyErr) {
       console.error("Could not send sentence error reply:", replyErr.message);
     }
-  }
-}
-
-async function clearDeferredReply(interaction) {
-  try {
-    await interaction.deleteReply();
-  } catch (err) {
-    console.warn("Could not clear command reply:", err.message);
   }
 }
 
@@ -1483,7 +1304,7 @@ async function handleOutstandingDelete(interaction) {
       }
 
       const discordParsed = sourceMessage
-        ? parseCitationFromDiscordMessage(sourceMessage)
+        ? await parseCitationFromDiscordMessage(sourceMessage)
         : null;
       const record = mergeCitationRecord({
         sheetFields: sheetMatch?.fields ?? sheetMatches[0]?.fields,
@@ -1741,6 +1562,7 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
   ],
 });
 
@@ -1748,6 +1570,9 @@ client.once(Events.ClientReady, async (c) => {
   console.log(`Logged in as ${c.user.tag}`);
   console.log(
     "Listening for slash commands, modals, and point authorization buttons…"
+  );
+  console.log(
+    "Message Content intent is enabled — required to read manual outstanding citation text."
   );
   console.log("Keep only ONE bot window open.");
 

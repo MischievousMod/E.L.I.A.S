@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { google } from "googleapis";
 import { fieldDefinitions, lastDataColumn } from "./config.js";
+import { normalizeOfficerKey } from "./format.js";
 import { ceOffenderHeaderAliases } from "./ce-config.js";
 import { sentenceCheckboxColumn } from "./sentence-config.js";
 
@@ -55,11 +56,6 @@ export function getSheets() {
   return sheetsApi;
 }
 
-/** Test seam: inject a fake Sheets client (used by the mock stress test only). */
-export function __setSheetsClientForTests(client) {
-  sheetsApi = client;
-}
-
 /** Load the Google client on startup so the first citation is not slow. */
 export async function warmSheetClient() {
   getSheets();
@@ -103,12 +99,7 @@ function normalizeHeader(value) {
 }
 
 function normalizeUsername(value) {
-  return String(value ?? "")
-    .trim()
-    .replace(/^@+/, "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .toLowerCase();
+  return normalizeOfficerKey(value);
 }
 
 const CE_SKIP_SCAN_VALUES = new Set([
@@ -631,6 +622,14 @@ export async function appendRowToTab(
     throw new Error("SPREADSHEET_ID is not set in .env");
   }
 
+  const resolvedTab = await resolveSpreadsheetTabName(tabName);
+
+  if (!resolvedTab) {
+    throw new Error(
+      `Could not read tab "${tabName}". Make sure that tab exists.`
+    );
+  }
+
   const sheets = getSheets();
 
   let rows;
@@ -638,12 +637,12 @@ export async function appendRowToTab(
   try {
     const { data } = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: range(tabName, `${scanColumn}${firstDataRow}:${scanColumn}`),
+      range: range(resolvedTab, `${scanColumn}${firstDataRow}:${scanColumn}`),
     });
     rows = data.values ?? [];
   } catch (err) {
     throw new Error(
-      `Could not read tab "${tabName}". Make sure that tab exists. (${err.message})`
+      `Could not read tab "${resolvedTab}". Make sure that tab exists. (${err.message})`
     );
   }
 
@@ -659,7 +658,7 @@ export async function appendRowToTab(
   const data = Object.entries(columnValues)
     .filter(([, value]) => value !== undefined && value !== null && value !== "")
     .map(([column, value]) => ({
-      range: range(tabName, `${column}${nextRow}`),
+      range: range(resolvedTab, `${column}${nextRow}`),
       values: [[value]],
     }));
 
@@ -684,11 +683,19 @@ export async function writeCellOnTab(tabName, rowNumber, column, value) {
     throw new Error("SPREADSHEET_ID is not set in .env");
   }
 
+  const resolvedTab = await resolveSpreadsheetTabName(tabName);
+
+  if (!resolvedTab) {
+    throw new Error(
+      `Could not write to tab "${tabName}". Make sure that tab exists.`
+    );
+  }
+
   const sheets = getSheets();
 
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range: range(tabName, `${column}${rowNumber}`),
+    range: range(resolvedTab, `${column}${rowNumber}`),
     valueInputOption: "USER_ENTERED",
     requestBody: { values: [[value]] },
   });

@@ -1,5 +1,6 @@
 import { getSheets } from "./sheets.js";
 import { extractExecutorFromMessage } from "./citation-log.js";
+import { normalizeOfficerKey } from "./format.js";
 import {
   POINTS_CAREER_COLUMNS,
   POINTS_MONTHLY_JOBS_COLUMN,
@@ -43,11 +44,7 @@ export function parseOfficerFromMessage(message) {
 }
 
 function normalizeOfficerName(name) {
-  return String(name ?? "")
-    .trim()
-    .replace(/^@+/, "")
-    .replace(/\s+/g, " ")
-    .toLowerCase();
+  return normalizeOfficerKey(name);
 }
 
 /** Match an officer name against column C (case-insensitive, collapses whitespace). */

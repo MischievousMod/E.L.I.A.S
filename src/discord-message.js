@@ -44,8 +44,16 @@ export async function fetchDiscordMessage(client, rawUrl) {
     return null;
   }
 
-  const channel = await client.channels.fetch(parsed.channelId);
-  const message = await channel.messages.fetch(parsed.messageId, { force: true });
+  try {
+    const channel = await client.channels.fetch(parsed.channelId);
 
-  return message;
+    if (!channel?.isTextBased?.()) {
+      return null;
+    }
+
+    return await channel.messages.fetch(parsed.messageId, { force: true });
+  } catch (err) {
+    console.warn("Could not fetch Discord message:", err.message);
+    return null;
+  }
 }

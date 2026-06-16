@@ -5,6 +5,7 @@ import {
   normalizeInput,
   sanitizeForDisplay,
   splitDateAndTime,
+  normalizeUsernameKey,
 } from "./format.js";
 import { buildOfficialLogPayload, LOG_EMBED_COLOR } from "./log-render.js";
 
@@ -53,7 +54,7 @@ function fieldFromMap(map, ...aliases) {
 }
 
 function normalizeUsername(value) {
-  return normalizeInput(value).toLowerCase();
+  return normalizeUsernameKey(value);
 }
 
 function citationBody(text) {
@@ -174,10 +175,6 @@ function readCitationLabelStacked(lines, startIdx) {
   return normalizeInput(parts.join("\n"));
 }
 
-function readCitationLabel(text, label) {
-  return readCitationLabelBlock(text, label);
-}
-
 /** Executor from embed fields or legacy slip text. */
 export function extractExecutorFromMessage(message) {
   const map = collectEmbedFieldMap(message);
@@ -209,7 +206,8 @@ export function extractExecutorFromMessage(message) {
 /** Offender from the OFFENDER row inside a citation code block (legacy: USERNAME). */
 export function extractCitationOffender(text) {
   return (
-    readCitationLabel(text, "OFFENDER") || readCitationLabel(text, "USERNAME")
+    readCitationLabelBlock(text, "OFFENDER") ||
+    readCitationLabelBlock(text, "USERNAME")
   );
 }
 
@@ -227,11 +225,11 @@ export function parseOutstandingCitationText(text) {
     amountOwed: readCitationLabelBlock(text, "AMOUNT OWED"),
     fineMessage: readCitationLabelBlock(text, "FINE MESSAGE"),
     startDate: readCitationLabelBlock(text, "START DATE"),
-    status: readCitationLabel(text, "STATUS"),
+    status: readCitationLabelBlock(text, "STATUS"),
     officer:
       readCitationLabelBlock(text, "EXECUTOR") ||
       readCitationLabelBlock(text, "OFFICER"),
-    refNo: readCitationLabel(text, "REF NO."),
+    refNo: readCitationLabelBlock(text, "REF NO."),
   };
 }
 
@@ -263,6 +261,10 @@ export function parseOutstandingCitationFromEmbeds(message) {
 }
 
 export function parseOutstandingCitationFromMessage(message) {
+  if (isManualOutstandingCitation(message)) {
+    return parseManualOutstandingCitationFromMessage(message);
+  }
+
   return (
     parseOutstandingCitationFromEmbeds(message) ??
     parseOutstandingCitationText(messageText(message))
@@ -372,11 +374,120 @@ export function messageText(message) {
   return parts.join("\n");
 }
 
-function embedTitleMatchesOutstanding(title) {
-  return String(title ?? "").toUpperCase().includes(CITATION_MARKER);
+/** Labels on manually posted outstanding citations (markdown **Label:** lines). */
+const MANUAL_CITATION_LABELS = [
+  "Offender",
+  "Code(s) broken",
+  "Fine Amount",
+  "Fine Message",
+  "Evidence",
+];
+
+/** Strip Discord markdown asterisks/underscores from a label token. */
+function stripMarkdownDecorators(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/^[*_~|]+/, "")
+    .replace(/[*_~|]+$/, "")
+    .trim();
 }
 
-export function isOutstandingCitationLog(message, botUserId) {
+function manualCitationTextFromMessage(message) {
+  const parts = [];
+
+  if (message?.content) {
+    parts.push(message.content);
+  }
+
+  for (const embed of message?.embeds ?? []) {
+    if (embed.description) {
+      parts.push(embed.description);
+    }
+
+    for (const field of embed.fields ?? []) {
+      parts.push(`${field.name}\n${field.value}`);
+    }
+  }
+
+  return parts.join("\n").trim();
+}
+
+function readManualCitationLabel(content, label) {
+  const targetLabel = normalizeFieldName(label);
+
+  for (const rawLine of String(content ?? "").split("\n")) {
+    const line = rawLine.trim();
+
+    if (!line.includes(":")) {
+      continue;
+    }
+
+    const withoutMd = line.replace(/\*\*/g, "").replace(/\*/g, "");
+    const colonIdx = withoutMd.indexOf(":");
+
+    if (colonIdx === -1) {
+      continue;
+    }
+
+    const lineLabel = stripMarkdownDecorators(
+      withoutMd.slice(0, colonIdx).trim()
+    );
+
+    if (normalizeFieldName(lineLabel) !== targetLabel) {
+      continue;
+    }
+
+    return normalizeInput(withoutMd.slice(colonIdx + 1).trim());
+  }
+
+  return "";
+}
+
+/** True when the message is a human-posted markdown outstanding citation slip. */
+export function isManualOutstandingCitation(message) {
+  const content = manualCitationTextFromMessage(message);
+
+  if (!content) {
+    return false;
+  }
+
+  const offender = readManualCitationLabel(content, "Offender");
+
+  if (!offender) {
+    return false;
+  }
+
+  return MANUAL_CITATION_LABELS.slice(1).some((label) =>
+    Boolean(readManualCitationLabel(content, label))
+  );
+}
+
+/** Parse a manually posted markdown outstanding citation from message content. */
+export function parseManualOutstandingCitationText(content) {
+  const offender = readManualCitationLabel(content, "Offender");
+
+  if (!offender) {
+    return null;
+  }
+
+  return {
+    offender,
+    rank: "",
+    infractions: readManualCitationLabel(content, "Code(s) broken"),
+    amountOwed: readManualCitationLabel(content, "Fine Amount"),
+    fineMessage: readManualCitationLabel(content, "Fine Message"),
+    startDate: "",
+    status: "",
+    officer: "",
+    refNo: "",
+  };
+}
+
+function parseManualOutstandingCitationFromMessage(message) {
+  return parseManualOutstandingCitationText(manualCitationTextFromMessage(message));
+}
+
+function isBotOutstandingCitationLog(message, botUserId) {
   if (botUserId && message.author.id !== botUserId) {
     return false;
   }
@@ -408,6 +519,17 @@ export function isOutstandingCitationLog(message, botUserId) {
   return footerOk && Boolean(extractCitationUsername(text));
 }
 
+function embedTitleMatchesOutstanding(title) {
+  return String(title ?? "").toUpperCase().includes(CITATION_MARKER);
+}
+
+export function isOutstandingCitationLog(message, botUserId) {
+  return (
+    isBotOutstandingCitationLog(message, botUserId) ||
+    isManualOutstandingCitation(message)
+  );
+}
+
 export function citationLogMatchesUsername(message, username, botUserId) {
   if (!isOutstandingCitationLog(message, botUserId)) {
     return false;
@@ -419,14 +541,14 @@ export function citationLogMatchesUsername(message, username, botUserId) {
   return normalizeUsername(cited) === normalizeUsername(username);
 }
 
-/** Scan recent channel messages for outstanding citation logs for this username. */
-export async function findCitationLogMessages(
+/** Scan recent messages in one text channel or thread for citation logs. */
+async function scanChannelForCitationLogs(
   channel,
   username,
   botUserId,
+  matches,
   { maxScan = 500 } = {}
 ) {
-  const matches = [];
   let before;
   let scanned = 0;
 
@@ -463,6 +585,84 @@ export async function findCitationLogMessages(
     if (batch.size < limit) {
       break;
     }
+  }
+
+  return scanned;
+}
+
+async function scanChannelThreadsForCitationLogs(
+  channel,
+  username,
+  botUserId,
+  matches,
+  options
+) {
+  if (!channel.threads?.fetchActive) {
+    return 0;
+  }
+
+  let scanned = 0;
+
+  try {
+    const { threads } = await channel.threads.fetchActive();
+
+    for (const thread of threads.values()) {
+      if (!thread?.isTextBased()) {
+        continue;
+      }
+
+      scanned += await scanChannelForCitationLogs(
+        thread,
+        username,
+        botUserId,
+        matches,
+        options
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `Could not scan active threads in #${channel.name ?? channel.id}:`,
+      err.message
+    );
+  }
+
+  return scanned;
+}
+
+/** Scan recent channel messages for outstanding citation logs for this username. */
+export async function findCitationLogMessages(
+  channel,
+  username,
+  botUserId,
+  { maxScan = 500, includeThreads = true } = {}
+) {
+  const matches = [];
+  const scanned = await scanChannelForCitationLogs(
+    channel,
+    username,
+    botUserId,
+    matches,
+    { maxScan }
+  );
+
+  if (includeThreads) {
+    await scanChannelThreadsForCitationLogs(
+      channel,
+      username,
+      botUserId,
+      matches,
+      { maxScan }
+    );
+  }
+
+  console.log(
+    `Citation scan in #${channel.name ?? channel.id} for "${username}": scanned ${scanned} message(s), found ${matches.length} match(es).`
+  );
+
+  if (!matches.length && process.env.LOG_CITATION_SCAN === "1") {
+    console.warn(
+      `No citation matches in #${channel.name ?? channel.id} for "${username}" after scanning ${scanned} message(s).`
+    );
   }
 
   return matches;

@@ -153,7 +153,6 @@ Or double-click **`register.bat`** once, then **`start-bot.bat`**.
 
 ```powershell
 npm.cmd run register   # after editing src/commands.js
-node scripts/stress-test.mjs   # mock Sheets + points regression (no live API)
 ```
 
 Key source files:

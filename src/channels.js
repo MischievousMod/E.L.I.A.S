@@ -159,3 +159,20 @@ export function resolveSeminarChannel(guild) {
 export function resolvePointsLogChannel(guild) {
   return resolveConfiguredChannel(guild, CHANNEL_CONFIG.pointsLog);
 }
+
+/**
+ * Maps log channel ids to points sheet columns (E–J).
+ * Single source of truth — keep in sync with POINTS_COLUMN_LABELS in points-config.js.
+ */
+export function buildPointsChannelColumns() {
+  return {
+    [resolvedChannelId(CHANNEL_CONFIG.citations)]: "E",
+    [resolvedChannelId(CHANNEL_CONFIG.interview)]: "F",
+    [resolvedChannelId(CHANNEL_CONFIG.spectator)]: "G",
+    [resolvedChannelId(CHANNEL_CONFIG.outstandingSentences)]: "I",
+    [resolvedChannelId(CHANNEL_CONFIG.classE)]: "I",
+    [resolvedChannelId(CHANNEL_CONFIG.seminar)]: "J",
+  };
+}
+
+export const POINTS_CHANNEL_COLUMNS = buildPointsChannelColumns();
