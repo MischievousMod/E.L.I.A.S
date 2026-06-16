@@ -142,6 +142,37 @@ function shouldSkipCeScanCell(value) {
 }
 
 /** Match a configured CE tab name to the spreadsheet (trim + case-insensitive). */
+async function listSpreadsheetTabs(sheets, spreadsheetId) {
+  const { data } = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: "sheets(properties(sheetId,title))",
+  });
+
+  return data.sheets ?? [];
+}
+
+function matchSpreadsheetTab(tabs, tabName) {
+  const requested = String(tabName ?? "").trim();
+
+  if (!requested) {
+    return null;
+  }
+
+  const exact = tabs.find((entry) => entry.properties?.title === requested);
+
+  if (exact) {
+    return exact;
+  }
+
+  const target = requested.toLowerCase();
+
+  return (
+    tabs.find(
+      (entry) => entry.properties?.title?.trim().toLowerCase() === target
+    ) ?? null
+  );
+}
+
 export async function resolveSpreadsheetTabName(tabName) {
   const spreadsheetId = process.env.SPREADSHEET_ID;
 
@@ -150,28 +181,8 @@ export async function resolveSpreadsheetTabName(tabName) {
   }
 
   const sheets = getSheets();
-  const { data } = await sheets.spreadsheets.get({
-    spreadsheetId,
-    fields: "sheets(properties/title)",
-  });
-
-  const titles =
-    data.sheets?.map((entry) => entry.properties?.title).filter(Boolean) ?? [];
-  const requested = String(tabName ?? "").trim();
-
-  if (!requested) {
-    return null;
-  }
-
-  const exact = titles.find((title) => title === requested);
-
-  if (exact) {
-    return exact;
-  }
-
-  const target = requested.toLowerCase();
-
-  return titles.find((title) => title.trim().toLowerCase() === target) ?? null;
+  const tabs = await listSpreadsheetTabs(sheets, spreadsheetId);
+  return matchSpreadsheetTab(tabs, tabName)?.properties?.title ?? null;
 }
 
 /**
@@ -180,13 +191,16 @@ export async function resolveSpreadsheetTabName(tabName) {
  */
 export async function resolveCeTabScan(tabName) {
   const spreadsheetId = process.env.SPREADSHEET_ID;
-  const resolvedTab = await resolveSpreadsheetTabName(tabName);
+  const sheets = getSheets();
+  const tabs = await listSpreadsheetTabs(sheets, spreadsheetId);
+  const tabEntry = matchSpreadsheetTab(tabs, tabName);
 
-  if (!resolvedTab) {
-    return { tabName: null, scanColumn: "B", firstDataRow: 2 };
+  if (!tabEntry?.properties?.title) {
+    return { tabName: null, sheetId: null, scanColumn: "B", firstDataRow: 2 };
   }
 
-  const sheets = getSheets();
+  const resolvedTab = tabEntry.properties.title;
+  const sheetId = tabEntry.properties.sheetId;
   let grid = [];
 
   try {
@@ -196,7 +210,12 @@ export async function resolveCeTabScan(tabName) {
     });
     grid = data.values ?? [];
   } catch {
-    return { tabName: resolvedTab, scanColumn: "B", firstDataRow: 2 };
+    return {
+      tabName: resolvedTab,
+      sheetId,
+      scanColumn: "B",
+      firstDataRow: 2,
+    };
   }
 
   let headerRow = -1;
@@ -217,6 +236,7 @@ export async function resolveCeTabScan(tabName) {
 
   return {
     tabName: resolvedTab,
+    sheetId,
     scanColumn,
     firstDataRow: headerRow >= 0 ? headerRow + 2 : 2,
   };
@@ -243,9 +263,13 @@ export async function findCeRowsByOffender(tabName, offender) {
   }
 
   const sheets = getSheets();
+  const startRow = layout.firstDataRow ?? 2;
   const { data } = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: range(layout.tabName, `${layout.scanColumn}2:${layout.scanColumn}`),
+    range: range(
+      layout.tabName,
+      `${layout.scanColumn}${startRow}:${layout.scanColumn}`
+    ),
   });
 
   const rows = data.values ?? [];
@@ -259,13 +283,14 @@ export async function findCeRowsByOffender(tabName, offender) {
     }
 
     if (normalizeUsername(raw) === target) {
-      matches.push(i + 2);
+      matches.push(i + startRow);
     }
   }
 
   return {
     ok: true,
     tabName: layout.tabName,
+    sheetId: layout.sheetId,
     scanColumn: layout.scanColumn,
     firstDataRow: layout.firstDataRow,
     matches,
@@ -284,9 +309,14 @@ export async function deleteCeRowsByOffender(tabName, offender) {
     return { ...lookup, deleted: 0 };
   }
 
-  const spreadsheetId = process.env.SPREADSHEET_ID;
   const sheets = getSheets();
-  const sheetId = await getSheetId(sheets, spreadsheetId, lookup.tabName);
+  const sheetId = lookup.sheetId;
+
+  if (sheetId == null) {
+    return { ok: false, reason: "tab-not-found", tabName: lookup.tabName, matches: [] };
+  }
+
+  const spreadsheetId = process.env.SPREADSHEET_ID;
 
   const requests = lookup.matches
     .sort((a, b) => b - a)
@@ -532,20 +562,14 @@ export async function appendSubmission(sheetName, fieldValues) {
 }
 
 async function getSheetId(sheets, spreadsheetId, sheetName) {
-  const { data } = await sheets.spreadsheets.get({
-    spreadsheetId,
-    fields: "sheets(properties(sheetId,title))",
-  });
+  const tabs = await listSpreadsheetTabs(sheets, spreadsheetId);
+  const entry = matchSpreadsheetTab(tabs, sheetName);
 
-  const sheet = data.sheets?.find(
-    (entry) => entry.properties?.title === sheetName
-  );
-
-  if (!sheet?.properties?.sheetId) {
+  if (entry?.properties?.sheetId == null) {
     throw new Error(`Sheet not found: ${sheetName}`);
   }
 
-  return sheet.properties.sheetId;
+  return entry.properties.sheetId;
 }
 
 /** All data rows whose offender column matches (case-insensitive). */

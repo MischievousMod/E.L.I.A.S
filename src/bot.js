@@ -6,7 +6,6 @@ import {
   Client,
   Events,
   GatewayIntentBits,
-  MessageFlags,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -15,18 +14,40 @@ import { buildHelpText } from "./commands.js";
 import { commandFields, fieldDefinitions } from "./config.js";
 import {
   resolveCitationsChannel,
+  postToCitationsThread,
   resolveClassESentencesChannel,
   resolveInterviewChannel,
+  resolveInvestigationChannel,
   resolveOutstandingCitationsChannel,
   resolveOutstandingSentencesChannel,
   resolvePointsLogChannel,
   resolveSeminarChannel,
   resolveSpectatorChannel,
+  resolveWatchlistChannel,
   requiredChannelForCommand,
+  threadMention,
+  threadNotFoundMessage,
 } from "./channels.js";
 import { buildSpectatorReply } from "./spectator-log.js";
 import { buildInterviewReply } from "./interview-log.js";
 import { buildSeminarReply } from "./seminar-log.js";
+import { buildWatchlistReply } from "./watchlist-log.js";
+import {
+  buildInvestigationReply,
+  buildShortInvestigationReply,
+} from "./investigation-log.js";
+import {
+  INVESTIGATION_POINTS_AWARD_BUTTON,
+  INVESTIGATION_POINTS_FINALIZE_BUTTON,
+  INVESTIGATION_POINTS_MODAL_ID,
+  INVESTIGATION_POINTS_UNDO_PREFIX,
+  buildInvestigationPointsComponents,
+  buildInvestigationPointsModal,
+  buildInvestigationLogEditPayload,
+  isInvestigationPointsClosedMessage,
+  parseInvestigationAwardsFromMessage,
+  parseInvestigationPointsModalInput,
+} from "./investigation-points.js";
 import {
   adjustOfficerPoints,
   parseOfficerFromMessage,
@@ -37,6 +58,7 @@ import {
   POINTS_CHANNEL_COLUMNS,
   POINTS_COLUMN_LABELS,
   POINTS_EMOJI,
+  AWARD_JOB_TYPE_COLUMNS,
 } from "./points-config.js";
 import {
   cePermanentColumns,
@@ -75,7 +97,10 @@ import {
 import { fetchDiscordMessage } from "./discord-message.js";
 import {
   clearDeferredReply,
+  failInteraction,
+  acknowledgeInteraction,
   replyEphemeral,
+  replyOrEditEphemeral,
 } from "./interaction-helpers.js";
 import {
   buildPaidCitationReply,
@@ -113,6 +138,10 @@ import {
   upsertRegistration,
 } from "./registry.js";
 
+function isHttpUrl(value) {
+  return /^https?:\/\//i.test(String(value ?? "").trim());
+}
+
 ensureGoogleCredentialsFile();
 
 const token = process.env.DISCORD_TOKEN;
@@ -120,11 +149,32 @@ const sheetName = process.env.SHEET_NAME || "Sheet1";
 
 /** Screenshots awaiting the /interview modal submit, keyed by interaction id. */
 const pendingInterviews = new Map();
+/** Evidence + metadata awaiting the /investigation modal submit. */
+const pendingShortInvestigations = new Map();
 const INTERVIEW_FORM_TTL_MS = 15 * 60 * 1000;
 const REGISTER_MODAL_ID = "register_modal";
+const INTERVIEW_MODAL_PREFIX = "interview_modal:";
+const SHORT_INVESTIGATION_MODAL_PREFIX = "short_investigation_modal:";
 
 /** Commands usable without being in the registry. */
 const OPEN_COMMANDS = new Set(["register", "help"]);
+
+/** Chat commands that open a modal — must not defer before showModal. */
+const MODAL_COMMANDS = new Set(["register", "interview", "investigation"]);
+
+function interactionOpensModal(interaction) {
+  if (
+    interaction.isButton() &&
+    interaction.customId === INVESTIGATION_POINTS_AWARD_BUTTON
+  ) {
+    return true;
+  }
+
+  return (
+    interaction.isChatInputCommand() &&
+    MODAL_COMMANDS.has(interaction.commandName)
+  );
+}
 
 function buildDiscordMessageLink(interaction, message) {
   const channelId = message.channelId;
@@ -211,12 +261,12 @@ async function handleOutstandingSentences(interaction) {
   const screenshot = interaction.options.getAttachment("screenshot");
 
   if (!username) {
-    await replyEphemeral(interaction, "Please provide a username.");
+    await replyOrEditEphemeral(interaction, "Please provide a username.");
     return;
   }
 
   if (!screenshot) {
-    await replyEphemeral(
+    await replyOrEditEphemeral(
       interaction,
       "Please attach a screenshot to the command (drag into the attachment box)."
     );
@@ -224,9 +274,9 @@ async function handleOutstandingSentences(interaction) {
   }
 
   if (!interaction.guild) {
-    await replyEphemeral(
+    await replyOrEditEphemeral(
       interaction,
-      "Run this command in a server with an **#outstanding-citations** channel."
+      `Run this command in the ${threadMention("outstandingSentences")} thread.`
     );
     return;
   }
@@ -234,17 +284,13 @@ async function handleOutstandingSentences(interaction) {
   const officer = await resolveOfficerName(interaction);
   const filedAt = splitDateAndTime(interaction.createdAt);
 
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
   try {
     const citationsChannel = await resolveOutstandingCitationsChannel(
       interaction.guild
     );
 
     if (!citationsChannel) {
-      throw new Error(
-        "Could not find #outstanding-citations. Create that channel or set OUTSTANDING_CITATIONS_CHANNEL_ID in .env."
-      );
+      throw new Error(threadNotFoundMessage("outstandingCitations"));
     }
 
     const citationMessages = await findCitationLogMessages(
@@ -306,9 +352,7 @@ async function handleOutstandingSentences(interaction) {
     );
 
     if (!sentencesChannel) {
-      throw new Error(
-        "Could not find the outstanding citation sentences channel. Set OUTSTANDING_SENTENCES_CHANNEL_ID in .env."
-      );
+      throw new Error(threadNotFoundMessage("outstandingSentences"));
     }
 
     const checkedRows = checkboxResult?.rowNumbers?.length ?? 0;
@@ -363,8 +407,6 @@ function collectScreenshots(interaction) {
   return images;
 }
 
-const INTERVIEW_MODAL_PREFIX = "interview_modal:";
-
 async function handleRegister(interaction) {
   const modal = new ModalBuilder()
     .setCustomId(REGISTER_MODAL_ID)
@@ -389,14 +431,9 @@ async function handleRegisterModalSubmit(interaction) {
   );
 
   if (!username) {
-    await interaction.reply({
-      content: "Please enter a username.",
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyOrEditEphemeral(interaction, "Please enter a username.");
     return;
   }
-
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   try {
     const result = await upsertRegistration(interaction.user.id, username);
@@ -422,9 +459,80 @@ async function handleRegisterModalSubmit(interaction) {
   }
 }
 
-async function handleRegistryStats(interaction) {
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+async function handleAwardPoint(interaction) {
+  if (!interaction.guild) {
+    await replyOrEditEphemeral(interaction, "Run this command in a server.");
+    return;
+  }
 
+  if (!(await memberHasAuthRole(interaction.guild, interaction.user.id))) {
+    await replyOrEditEphemeral(
+      interaction,
+      "Only members with the points authorization role can award points."
+    );
+    return;
+  }
+
+  const username = normalizeInput(interaction.options.getString("username"));
+  const jobType = interaction.options.getString("job_type");
+  const points = interaction.options.getInteger("points");
+  const column = AWARD_JOB_TYPE_COLUMNS[jobType];
+
+  if (!username || !column || !points) {
+    await replyOrEditEphemeral(
+      interaction,
+      "Please provide a username, job type, and point amount."
+    );
+    return;
+  }
+
+  try {
+    const result = await adjustOfficerPoints(username, column, points);
+    const jobLabel = POINTS_COLUMN_LABELS[column] ?? "Job";
+
+    if (!result.ok) {
+      await interaction.editReply({
+        content:
+          result.reason === "officer-not-found"
+            ? `⚠️ **${sanitizeForDisplay(username)}** was not found in the points sheet (column C).`
+            : `Could not award points (${result.reason}).`,
+      });
+      return;
+    }
+
+    await interaction.editReply({
+      content: `✅ Added **${points}** ${jobLabel} point(s) for **${sanitizeForDisplay(username)}**. ${jobLabel} total: **${result.next}** · Monthly jobs: **${result.monthlyNext}** · Total jobs: **${result.totalJobs}**.`,
+    });
+
+    try {
+      const logChannel = await resolvePointsLogChannel(interaction.guild);
+
+      if (logChannel) {
+        await logChannel.send({
+          content: `💻 **${interaction.user.username}** awarded **${points}** **${jobLabel}** point(s) to **${sanitizeForDisplay(username)}** (${jobLabel}: ${result.next}, monthly: ${result.monthlyNext}, total jobs: ${result.totalJobs}).`,
+        });
+      }
+    } catch (err) {
+      console.warn("Could not post points award audit log:", err.message);
+    }
+
+    console.log(
+      `Award +${points} (${column}) for ${username} → ${result.next} by ${interaction.user.tag}`
+    );
+  } catch (err) {
+    console.error("Award point failed:", err);
+
+    try {
+      await interaction.editReply({
+        content: `Could not award points: ${err.message}`,
+      });
+    } catch (replyErr) {
+      console.error("Could not send award error reply:", replyErr.message);
+    }
+  }
+}
+
+async function handleRegistryStats(interaction) {
   const requestedName = normalizeInput(
     interaction.options.getString("username")
   );
@@ -496,8 +604,6 @@ async function handleRegistry(interaction) {
     return;
   }
 
-  await interaction.deferReply();
-
   try {
     const entries = await listRegistrations();
     await interaction.editReply({
@@ -520,14 +626,12 @@ async function handleRegistryDelete(interaction) {
   const member = interaction.options.getUser("member");
 
   if (!member) {
-    await interaction.reply({
-      content: "Please choose a member to remove.",
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyOrEditEphemeral(
+      interaction,
+      "Please choose a member to remove."
+    );
     return;
   }
-
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   try {
     const removed = await removeRegistration(member.id);
@@ -563,7 +667,7 @@ async function handleInterview(interaction) {
   if (!interaction.guild) {
     await replyEphemeral(
       interaction,
-      "Run this command in a server with an **#interview** channel."
+      `Run this command in the ${threadMention("interview")} thread.`
     );
     return;
   }
@@ -644,11 +748,10 @@ async function handleInterviewModalSubmit(interaction) {
   );
 
   if (!pending) {
-    await interaction.reply({
-      content:
-        "This interview form expired — please run `/interview` again with your screenshot.",
-      flags: MessageFlags.Ephemeral,
-    });
+    await replyOrEditEphemeral(
+      interaction,
+      "This interview form expired — please run `/interview` again with your screenshot."
+    );
     return;
   }
 
@@ -658,15 +761,11 @@ async function handleInterviewModalSubmit(interaction) {
   const refId = interaction.id.slice(-8).toUpperCase();
   const filedAt = splitDateAndTime(interaction.createdAt);
 
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
   try {
     const channel = await resolveInterviewChannel(interaction.guild);
 
     if (!channel) {
-      throw new Error(
-        "Could not find #interview. Create that channel or set INTERVIEW_CHANNEL_ID in .env."
-      );
+      throw new Error(threadNotFoundMessage("interview"));
     }
 
     const confirmation = `Interview log filed for **${sanitizeForDisplay(username)}**.`;
@@ -712,7 +811,7 @@ async function handleSeminar(interaction) {
   );
 
   if (!username || !host || !seminarType) {
-    await replyEphemeral(
+    await replyOrEditEphemeral(
       interaction,
       "Please fill in username, host username, and seminar type."
     );
@@ -720,9 +819,9 @@ async function handleSeminar(interaction) {
   }
 
   if (!interaction.guild) {
-    await replyEphemeral(
+    await replyOrEditEphemeral(
       interaction,
-      "Run this command in a server with a **#seminar** channel."
+      `Run this command in the ${threadMention("seminar")} thread.`
     );
     return;
   }
@@ -730,7 +829,7 @@ async function handleSeminar(interaction) {
   const images = collectScreenshots(interaction);
 
   if (!images.length) {
-    await replyEphemeral(interaction, "At least one screenshot is required.");
+    await replyOrEditEphemeral(interaction, "At least one screenshot is required.");
     return;
   }
 
@@ -738,15 +837,11 @@ async function handleSeminar(interaction) {
   const refId = interaction.id.slice(-8).toUpperCase();
   const filedAt = splitDateAndTime(interaction.createdAt);
 
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
   try {
     const channel = await resolveSeminarChannel(interaction.guild);
 
     if (!channel) {
-      throw new Error(
-        "Could not find #seminar. Create that channel or set SEMINAR_CHANNEL_ID in .env."
-      );
+      throw new Error(threadNotFoundMessage("seminar"));
     }
 
     const confirmation = `Seminar log filed for **${sanitizeForDisplay(username)}**.`;
@@ -789,7 +884,7 @@ async function handleSpectator(interaction) {
   const comments = normalizeInput(interaction.options.getString("comments"));
 
   if (!username || !rank || !comments) {
-    await replyEphemeral(
+    await replyOrEditEphemeral(
       interaction,
       "Please fill in username, rank, and comments."
     );
@@ -797,9 +892,9 @@ async function handleSpectator(interaction) {
   }
 
   if (!interaction.guild) {
-    await replyEphemeral(
+    await replyOrEditEphemeral(
       interaction,
-      "Run this command in a server with a **#spectator** channel."
+      `Run this command in the ${threadMention("spectator")} thread.`
     );
     return;
   }
@@ -807,7 +902,7 @@ async function handleSpectator(interaction) {
   const images = collectScreenshots(interaction);
 
   if (!images.length) {
-    await replyEphemeral(interaction, "At least one screenshot is required.");
+    await replyOrEditEphemeral(interaction, "At least one screenshot is required.");
     return;
   }
 
@@ -815,15 +910,11 @@ async function handleSpectator(interaction) {
   const refId = interaction.id.slice(-8).toUpperCase();
   const filedAt = splitDateAndTime(interaction.createdAt);
 
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
   try {
     const channel = await resolveSpectatorChannel(interaction.guild);
 
     if (!channel) {
-      throw new Error(
-        "Could not find #spectator. Create that channel or set SPECTATOR_CHANNEL_ID in .env."
-      );
+      throw new Error(threadNotFoundMessage("spectator"));
     }
 
     const confirmation = `Spectator log filed for **${sanitizeForDisplay(username)}**.`;
@@ -860,18 +951,335 @@ async function handleSpectator(interaction) {
   }
 }
 
+async function handleWatchlist(interaction) {
+  const username = normalizeInput(interaction.options.getString("username"));
+  const duration = normalizeInput(interaction.options.getString("duration"));
+  const reason = normalizeInput(interaction.options.getString("reason"));
+
+  if (!username || !duration || !reason) {
+    await replyOrEditEphemeral(
+      interaction,
+      "Please fill in username, duration, and reason."
+    );
+    return;
+  }
+
+  if (!interaction.guild) {
+    await replyOrEditEphemeral(
+      interaction,
+      `Run this command in the ${threadMention("watchlist")} thread.`
+    );
+    return;
+  }
+
+  const officer = await resolveOfficerName(interaction);
+  const refId = interaction.id.slice(-8).toUpperCase();
+  const filedAt = splitDateAndTime(interaction.createdAt);
+  const evidenceItems = evidenceFromCommandOptions(
+    interaction,
+    normalizeInput,
+    ["evidence_file", "evidence_file_2"]
+  );
+
+  try {
+    const channel = await resolveWatchlistChannel(interaction.guild);
+
+    if (!channel) {
+      throw new Error(threadNotFoundMessage("watchlist"));
+    }
+
+    const confirmation = `Watchlist entry filed for **${sanitizeForDisplay(username)}**.`;
+
+    const payload = buildWatchlistReply({
+      username,
+      duration,
+      reason,
+      officer,
+      refId,
+      filedAt,
+      evidenceItems,
+    });
+
+    await channel.send({
+      content: confirmation,
+      ...payload,
+    });
+
+    await clearDeferredReply(interaction);
+
+    console.log(`Watchlist entry filed for ${username} by ${officer}`);
+  } catch (err) {
+    console.error("Watchlist log failed:", err);
+
+    try {
+      await interaction.editReply({
+        content: `Could not file watchlist entry: ${err.message}`,
+      });
+    } catch (replyErr) {
+      console.error("Could not send watchlist error reply:", replyErr.message);
+    }
+  }
+}
+
+async function handleLongInvestigation(interaction) {
+  const username = normalizeInput(interaction.options.getString("username"));
+  const documentLink = normalizeInput(
+    interaction.options.getString("document_link")
+  );
+  const verdict = normalizeInput(interaction.options.getString("verdict"));
+
+  if (!username || !documentLink || !verdict) {
+    await replyOrEditEphemeral(
+      interaction,
+      "Please provide a username, document link, and verdict."
+    );
+    return;
+  }
+
+  if (!isHttpUrl(documentLink)) {
+    await replyOrEditEphemeral(
+      interaction,
+      "Document link must start with `http://` or `https://`."
+    );
+    return;
+  }
+
+  if (!interaction.guild) {
+    await replyOrEditEphemeral(
+      interaction,
+      `Run this command in the ${threadMention("investigation")} thread.`
+    );
+    return;
+  }
+
+  const officer = await resolveOfficerName(interaction);
+  const refId = interaction.id.slice(-8).toUpperCase();
+  const filedAt = splitDateAndTime(interaction.createdAt);
+
+  try {
+    const channel = await resolveInvestigationChannel(interaction.guild);
+
+    if (!channel) {
+      throw new Error(threadNotFoundMessage("investigation"));
+    }
+
+    const confirmation = `Long investigation log filed for **${sanitizeForDisplay(username)}**.`;
+
+    const payload = buildInvestigationReply({
+      username,
+      documentLink,
+      verdict,
+      officer,
+      refId,
+      filedAt,
+    });
+
+    const components = buildInvestigationPointsComponents();
+    const awardButtonId = components[0]?.components?.[0]?.data?.custom_id;
+
+    if (awardButtonId !== INVESTIGATION_POINTS_AWARD_BUTTON) {
+      throw new Error(
+        `Investigation UI misconfigured (expected ${INVESTIGATION_POINTS_AWARD_BUTTON}, got ${awardButtonId ?? "none"})`
+      );
+    }
+
+    await channel.send({
+      content: confirmation,
+      ...payload,
+      components,
+    });
+
+    await clearDeferredReply(interaction);
+
+    console.log(
+      `Long investigation log filed for ${username} by ${officer} (Award investigation points controls)`
+    );
+  } catch (err) {
+    console.error("Long investigation log failed:", err);
+
+    try {
+      await interaction.editReply({
+        content: `Could not file long investigation log: ${err.message}`,
+      });
+    } catch (replyErr) {
+      console.error(
+        "Could not send long investigation error reply:",
+        replyErr.message
+      );
+    }
+  }
+}
+
+async function handleShortInvestigation(interaction) {
+  if (!interaction.guild) {
+    await replyEphemeral(
+      interaction,
+      `Run this command in the ${threadMention("investigation")} thread.`
+    );
+    return;
+  }
+
+  const evidenceItems = evidenceFromCommandOptions(
+    interaction,
+    normalizeInput,
+    MULTI_EVIDENCE_FILE_OPTION_NAMES
+  );
+
+  if (!evidenceItems.length) {
+    await replyEphemeral(
+      interaction,
+      "Evidence is required — provide an evidence link or attach up to four files."
+    );
+    return;
+  }
+
+  const token = interaction.id;
+  pendingShortInvestigations.set(token, {
+    evidenceItems,
+    createdAt: Date.now(),
+  });
+
+  setTimeout(
+    () => pendingShortInvestigations.delete(token),
+    INTERVIEW_FORM_TTL_MS
+  );
+
+  const modal = new ModalBuilder()
+    .setCustomId(`${SHORT_INVESTIGATION_MODAL_PREFIX}${token}`)
+    .setTitle("Investigation Log");
+
+  const usernameInput = new TextInputBuilder()
+    .setCustomId("username")
+    .setLabel("Username")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(500);
+
+  const interrogationInput = new TextInputBuilder()
+    .setCustomId("interrogation")
+    .setLabel("Interrogation")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setMaxLength(4000);
+
+  const verdictInput = new TextInputBuilder()
+    .setCustomId("verdict")
+    .setLabel("Verdict")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(500);
+
+  const commentsInput = new TextInputBuilder()
+    .setCustomId("comments")
+    .setLabel("Comments")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setMaxLength(1000);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(usernameInput),
+    new ActionRowBuilder().addComponents(interrogationInput),
+    new ActionRowBuilder().addComponents(verdictInput),
+    new ActionRowBuilder().addComponents(commentsInput)
+  );
+
+  await interaction.showModal(modal);
+}
+
+async function handleShortInvestigationModalSubmit(interaction) {
+  const token = interaction.customId.slice(SHORT_INVESTIGATION_MODAL_PREFIX.length);
+  const pending = pendingShortInvestigations.get(token);
+
+  const username = normalizeInput(
+    interaction.fields.getTextInputValue("username")
+  );
+  const interrogation = normalizeInput(
+    interaction.fields.getTextInputValue("interrogation")
+  );
+  const verdict = normalizeInput(interaction.fields.getTextInputValue("verdict"));
+  const comments = normalizeInput(
+    interaction.fields.getTextInputValue("comments")
+  );
+
+  if (!pending) {
+    await replyOrEditEphemeral(
+      interaction,
+      "This investigation form expired — please run `/investigation` again with your evidence."
+    );
+    return;
+  }
+
+  pendingShortInvestigations.delete(token);
+
+  const officer = await resolveOfficerName(interaction);
+  const refId = interaction.id.slice(-8).toUpperCase();
+  const filedAt = splitDateAndTime(interaction.createdAt);
+
+  try {
+    const channel = await resolveInvestigationChannel(interaction.guild);
+
+    if (!channel) {
+      throw new Error(threadNotFoundMessage("investigation"));
+    }
+
+    const confirmation = `Investigation log filed for **${sanitizeForDisplay(username)}**.`;
+
+    const payload = buildShortInvestigationReply({
+      username,
+      interrogation,
+      verdict,
+      comments,
+      officer,
+      refId,
+      filedAt,
+      evidenceItems: pending.evidenceItems,
+    });
+
+    const components = buildInvestigationPointsComponents();
+    const awardButtonId = components[0]?.components?.[0]?.data?.custom_id;
+
+    if (awardButtonId !== INVESTIGATION_POINTS_AWARD_BUTTON) {
+      throw new Error(
+        `Investigation UI misconfigured (expected ${INVESTIGATION_POINTS_AWARD_BUTTON}, got ${awardButtonId ?? "none"})`
+      );
+    }
+
+    await channel.send({
+      content: confirmation,
+      ...payload,
+      components,
+    });
+
+    await clearDeferredReply(interaction);
+
+    console.log(
+      `Investigation log filed for ${username} by ${officer} (Award investigation points controls)`
+    );
+  } catch (err) {
+    console.error("Short investigation log failed:", err);
+
+    try {
+      await interaction.editReply({
+        content: `Could not file investigation log: ${err.message}`,
+      });
+    } catch (replyErr) {
+      console.error(
+        "Could not send short investigation error reply:",
+        replyErr.message
+      );
+    }
+  }
+}
+
 async function handleCeDelete(interaction) {
   const offender = normalizeInput(interaction.options.getString("offender"));
 
   if (!offender) {
-    await interaction.reply({
+    await interaction.editReply({
       content: "Please provide an offender username.",
-      flags: MessageFlags.Ephemeral,
     });
     return;
   }
-
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   try {
     const tabs = Object.values(ceTabNames);
@@ -972,10 +1380,10 @@ async function handleCeSentences(interaction) {
   const notes = normalizeInput(interaction.options.getString("notes"));
 
   if (!offender || !codesBroken || !classESentence || !punishment) {
-    await replyEphemeral(
-      interaction,
-      "Please fill in offender, codes broken, Class-E sentence, and punishment."
-    );
+    await interaction.editReply({
+      content:
+        "Please fill in offender, codes broken, Class-E sentence, and punishment.",
+    });
     return;
   }
 
@@ -986,28 +1394,26 @@ async function handleCeSentences(interaction) {
   );
 
   if (!evidenceItems.length) {
-    await replyEphemeral(
-      interaction,
-      "Evidence is required — provide an evidence link or attach a file."
-    );
+    await interaction.editReply({
+      content:
+        "Evidence is required — provide an evidence link or attach a file.",
+    });
     return;
   }
 
   if (!interaction.guild) {
-    await replyEphemeral(
-      interaction,
-      "Run this command in a server with a **#class-e-sentences** channel."
-    );
+    await interaction.editReply({
+      content: `Run this command in the ${threadMention("classE")} thread.`,
+    });
     return;
   }
 
   const tabName = resolveCeTab(classESentence);
 
   if (!tabName) {
-    await replyEphemeral(
-      interaction,
-      `Could not determine the duration from "${sanitizeForDisplay(classESentence)}". Use a value like "3 days", "2 weeks", "1 month", or "Permanent".`
-    );
+    await interaction.editReply({
+      content: `Could not determine the duration from "${sanitizeForDisplay(classESentence)}". Use a value like "3 days", "2 weeks", "1 month", or "Permanent".`,
+    });
     return;
   }
 
@@ -1015,17 +1421,17 @@ async function handleCeSentences(interaction) {
 
   if (permanent) {
     if (!authorization || !banned) {
-      await replyEphemeral(
-        interaction,
-        "Permanent sentences require **authorization** and **banned** (Yes/No)."
-      );
+      await interaction.editReply({
+        content:
+          "Permanent sentences require **authorization** and **banned** (Yes/No).",
+      });
       return;
     }
   } else if (!rankPostInfraction) {
-    await replyEphemeral(
-      interaction,
-      "Please choose a **rank_post_infraction** (CD, CE, or L0–L5)."
-    );
+    await interaction.editReply({
+      content:
+        "Please choose a **rank_post_infraction** (CD, CE, or L0–L5).",
+    });
     return;
   }
 
@@ -1034,15 +1440,11 @@ async function handleCeSentences(interaction) {
   const submittedAt = interaction.createdAt;
   const filedAt = splitDateAndTime(submittedAt);
 
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
   try {
     const channel = await resolveClassESentencesChannel(interaction.guild);
 
     if (!channel) {
-      throw new Error(
-        "Could not find #class-e-sentences. Create that channel or set CLASS_E_CHANNEL_ID in .env."
-      );
+      throw new Error(threadNotFoundMessage("classE"));
     }
 
     let rowNumber;
@@ -1132,9 +1534,9 @@ async function handleCeSentences(interaction) {
 
 async function handleCite(interaction) {
   if (!interaction.guild) {
-    await replyEphemeral(
+    await replyOrEditEphemeral(
       interaction,
-      "Run this command in a server with a **#citations** channel."
+      `Run this command in the ${threadMention("citations")} thread.`
     );
     return;
   }
@@ -1151,7 +1553,7 @@ async function handleCite(interaction) {
   );
 
   if (!offender || !infractions || !amountPaid || !fineMessage) {
-    await replyEphemeral(
+    await replyOrEditEphemeral(
       interaction,
       "Please provide **offender**, **infractions**, **amount_paid**, and **fine_message**."
     );
@@ -1185,15 +1587,11 @@ async function handleCite(interaction) {
     evidenceItems,
   });
 
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
   try {
     const citationsChannel = await resolveCitationsChannel(interaction.guild);
 
     if (!citationsChannel) {
-      throw new Error(
-        "Could not find #citations. Create that channel or set CITATIONS_CHANNEL_ID in .env."
-      );
+      throw new Error(threadNotFoundMessage("citations"));
     }
 
     const confirmation = `Citation logged for **${sanitizeForDisplay(offender)}**.`;
@@ -1226,14 +1624,14 @@ async function handleOutstandingDelete(interaction) {
   const username = normalizeInput(interaction.options.getString("username"));
 
   if (!username) {
-    await replyEphemeral(interaction, "Please provide a username.");
+    await replyOrEditEphemeral(interaction, "Please provide a username.");
     return;
   }
 
   const screenshot = interaction.options.getAttachment("screenshot");
 
   if (!screenshot) {
-    await replyEphemeral(
+    await replyOrEditEphemeral(
       interaction,
       "Please attach a payment screenshot to the command."
     );
@@ -1241,9 +1639,9 @@ async function handleOutstandingDelete(interaction) {
   }
 
   if (!interaction.guild) {
-    await replyEphemeral(
+    await replyOrEditEphemeral(
       interaction,
-      "Run this command in a server with a **#citations** channel."
+      `Run this command in the ${threadMention("outstandingCitations")} thread.`
     );
     return;
   }
@@ -1252,8 +1650,6 @@ async function handleOutstandingDelete(interaction) {
 
   const screenshotItems = screenshotFromDeleteCommand(interaction);
   const paidAt = interaction.createdAt;
-
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   try {
     let sheetMatches = [];
@@ -1423,25 +1819,21 @@ async function handleOutstandingDelete(interaction) {
     const paidLogLinks = [];
 
     try {
-      const citationsChannel = await resolveCitationsChannel(interaction.guild);
-
-      if (!citationsChannel) {
-        throw new Error(
-          "Could not find #citations. Create that channel or set CITATIONS_CHANNEL_ID in .env."
+      const { messages: paidMessages } = await postToCitationsThread(
+          interaction.guild,
+          paidPayloads.map((payload) => ({
+            ...payload,
+            components: [buildPointsButtonRow()],
+          }))
         );
-      }
 
-      for (const payload of paidPayloads) {
-        const paidMessage = await citationsChannel.send({
-          ...payload,
-          components: [buildPointsButtonRow()],
-        });
+      for (const paidMessage of paidMessages) {
         paidLogLinks.push(buildDiscordMessageLink(interaction, paidMessage));
       }
 
       posted = true;
       console.log(
-        `Paid citation log(s) posted to #${citationsChannel.name} (${paidPayloads.length})`
+        `Paid citation log(s) posted to ${threadMention("citations")} (${paidMessages.length})`
       );
     } catch (err) {
       console.error("Paid citation log post failed:", err.message);
@@ -1568,6 +1960,16 @@ const client = new Client({
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`Logged in as ${c.user.tag}`);
+  console.log(`Bot process PID: ${process.pid}`);
+  if (process.env.RAILWAY_ENVIRONMENT) {
+    console.log(
+      `Running on Railway (${process.env.RAILWAY_ENVIRONMENT}) — do not also run start-bot.bat locally with the same token.`
+    );
+  } else {
+    console.log(
+      "Running locally — if Railway also uses this bot token, stop that deploy or interactions will fail."
+    );
+  }
   console.log(
     "Listening for slash commands, modals, and point authorization buttons…"
   );
@@ -1575,6 +1977,12 @@ client.once(Events.ClientReady, async (c) => {
     "Message Content intent is enabled — required to read manual outstanding citation text."
   );
   console.log("Keep only ONE bot window open.");
+  console.log(
+    "Investigation logs: Award investigation points (custom amounts, multiple officers)."
+  );
+  console.log(
+    "Bot build: investigation-points-v3 (points in message text, embed gallery preserved)."
+  );
 
   try {
     await warmSheetClient();
@@ -1591,6 +1999,14 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  const acked = await acknowledgeInteraction(interaction, {
+    skipModal: interactionOpensModal(interaction),
+  });
+
+  if (!acked) {
+    return;
+  }
+
   if (interaction.isModalSubmit() && interaction.customId === REGISTER_MODAL_ID) {
     try {
       await handleRegisterModalSubmit(interaction);
@@ -1613,6 +2029,86 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (
+    interaction.isModalSubmit() &&
+    interaction.customId.startsWith(SHORT_INVESTIGATION_MODAL_PREFIX)
+  ) {
+    try {
+      await handleShortInvestigationModalSubmit(interaction);
+    } catch (err) {
+      console.error("Short investigation modal submit failed:", err);
+    }
+    return;
+  }
+
+  if (
+    interaction.isModalSubmit() &&
+    interaction.customId === INVESTIGATION_POINTS_MODAL_ID
+  ) {
+    try {
+      await handleInvestigationPointsModalSubmit(interaction);
+    } catch (err) {
+      console.error("Investigation points modal failed:", err);
+      await failInteraction(
+        interaction,
+        err,
+        "Could not award investigation points."
+      );
+    }
+    return;
+  }
+
+  if (
+    interaction.isButton() &&
+    interaction.customId === INVESTIGATION_POINTS_AWARD_BUTTON
+  ) {
+    try {
+      await handleInvestigationPointsAwardButton(interaction);
+    } catch (err) {
+      console.error("Investigation points button failed:", err);
+      await failInteraction(
+        interaction,
+        err,
+        "Could not open investigation points form."
+      );
+    }
+    return;
+  }
+
+  if (
+    interaction.isButton() &&
+    interaction.customId === INVESTIGATION_POINTS_FINALIZE_BUTTON
+  ) {
+    try {
+      await handleInvestigationPointsFinalizeButton(interaction);
+    } catch (err) {
+      console.error("Investigation points finalize failed:", err);
+      await failInteraction(
+        interaction,
+        err,
+        "Could not close investigation points."
+      );
+    }
+    return;
+  }
+
+  if (
+    interaction.isButton() &&
+    interaction.customId.startsWith(INVESTIGATION_POINTS_UNDO_PREFIX)
+  ) {
+    try {
+      await handleInvestigationPointsUndoButton(interaction);
+    } catch (err) {
+      console.error("Investigation points undo failed:", err);
+      await failInteraction(
+        interaction,
+        err,
+        "Could not revoke investigation points."
+      );
+    }
+    return;
+  }
+
+  if (
     interaction.isButton() &&
     interaction.customId.startsWith(POINTS_BUTTON_PREFIX)
   ) {
@@ -1620,6 +2116,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await handlePointsButton(interaction);
     } catch (err) {
       console.error("Points button failed:", err);
+      await failInteraction(interaction, err, "Could not update points.");
     }
     return;
   }
@@ -1635,33 +2132,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
       registeredName = await getRegisteredUsername(interaction.user.id);
     } catch (err) {
       console.error("Registration check failed:", err.message);
-      try {
-        await interaction.reply({
-          content:
-            "Could not verify your registration right now. Please try again in a moment.",
-          flags: MessageFlags.Ephemeral,
-        });
-      } catch (replyErr) {
-        console.error("Could not send registration error:", replyErr.message);
-      }
+      await replyOrEditEphemeral(
+        interaction,
+        "Could not verify your registration right now. Please try again in a moment."
+      );
       return;
     }
 
     if (!registeredName) {
-      try {
-        await interaction.reply({
-          content:
-            "You must register first. Run **/register** and enter your username before using this command.",
-          flags: MessageFlags.Ephemeral,
-        });
-      } catch (err) {
-        console.error("Could not send registration prompt:", err.message);
-      }
+      await replyOrEditEphemeral(
+        interaction,
+        "You must register first. Run **/register** and enter your username before using this command."
+      );
       return;
     }
   }
 
-  // Channel restriction: each command may be locked to a specific channel.
+  // Thread restriction: each command may be locked to a specific forum thread.
   {
     const subForChannel = interaction.options.getSubcommand(false);
     const required = requiredChannelForCommand(
@@ -1670,14 +2157,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
     );
 
     if (required && interaction.channelId !== required.id) {
-      try {
-        await interaction.reply({
-          content: `This command can only be used in <#${required.id}>.`,
-          flags: MessageFlags.Ephemeral,
-        });
-      } catch (err) {
-        console.error("Could not send channel restriction notice:", err.message);
-      }
+      const destination =
+        required.kind === "thread"
+          ? `the **${required.displayName}** thread (<#${required.id}>)`
+          : `<#${required.id}>`;
+      await replyOrEditEphemeral(
+        interaction,
+        `This command can only be used in ${destination}.`
+      );
       return;
     }
   }
@@ -1700,6 +2187,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  if (interaction.commandName === "award") {
+    const awardSub = interaction.options.getSubcommand(false);
+
+    if (awardSub === "point") {
+      try {
+        await handleAwardPoint(interaction);
+      } catch (err) {
+        console.error("Award point command failed:", err);
+      }
+    }
+    return;
+  }
+
   if (interaction.commandName === "registry") {
     try {
       await handleRegistry(interaction);
@@ -1711,11 +2211,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   if (interaction.commandName === "help") {
     try {
-      await interaction.reply({
+      await interaction.editReply({
         content: buildHelpText(),
       });
     } catch (err) {
       console.error("Help command failed:", err);
+      await failInteraction(interaction, err, "Could not load help.");
     }
     return;
   }
@@ -1728,12 +2229,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await handleCeSentences(interaction);
       } catch (err) {
         console.error("Class-E sentences command failed:", err);
+        await failInteraction(
+          interaction,
+          err,
+          "Class-E sentence command failed."
+        );
       }
     } else if (ceSub === "delete") {
       try {
         await handleCeDelete(interaction);
       } catch (err) {
         console.error("Class-E delete command failed:", err);
+        await failInteraction(
+          interaction,
+          err,
+          "Class-E delete command failed."
+        );
       }
     }
     return;
@@ -1748,11 +2259,43 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  if (interaction.commandName === "watchlist") {
+    try {
+      await handleWatchlist(interaction);
+    } catch (err) {
+      console.error("Watchlist command failed:", err);
+    }
+    return;
+  }
+
+  if (interaction.commandName === "long") {
+    const longSub = interaction.options.getSubcommand(false);
+
+    if (longSub === "investigation") {
+      try {
+        await handleLongInvestigation(interaction);
+      } catch (err) {
+        console.error("Long investigation command failed:", err);
+      }
+    }
+    return;
+  }
+
+  if (interaction.commandName === "investigation") {
+    try {
+      await handleShortInvestigation(interaction);
+    } catch (err) {
+      console.error("Investigation command failed:", err);
+    }
+    return;
+  }
+
   if (interaction.commandName === "seminar") {
     try {
       await handleSeminar(interaction);
     } catch (err) {
       console.error("Seminar command failed:", err);
+      await failInteraction(interaction, err, "Could not file seminar log.");
     }
     return;
   }
@@ -1795,9 +2338,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (!interaction.guild) {
-    await replyEphemeral(
+    await replyOrEditEphemeral(
       interaction,
-      "Run this command in a server with an **#outstanding-citations** channel."
+      `Run this command in the ${threadMention("outstandingCitations")} thread.`
     );
     return;
   }
@@ -1811,7 +2354,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   );
 
   if (!fineMessage) {
-    await replyEphemeral(
+    await replyOrEditEphemeral(
       interaction,
       "Please provide a fine message on the command."
     );
@@ -1823,8 +2366,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     normalizeInput,
     MULTI_EVIDENCE_FILE_OPTION_NAMES
   );
-
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   console.log(`/outstanding citation from ${interaction.user.tag}`);
 
@@ -1880,9 +2421,328 @@ function readPointsButtonState(message) {
   return customId.endsWith(":1") ? 1 : 0;
 }
 
-async function handlePointsButton(interaction) {
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+async function postInvestigationPointsAudit(
+  interaction,
+  { officer, points, delta, result, logMessage }
+) {
+  const jobLabel = POINTS_COLUMN_LABELS.H ?? "Investigation";
+  const logLink = buildDiscordMessageLink(interaction, logMessage);
 
+  try {
+    const logChannel = await resolvePointsLogChannel(interaction.guild);
+
+    if (!logChannel) {
+      return;
+    }
+
+    const officerDisplay = sanitizeForDisplay(officer);
+
+    if (delta > 0) {
+      await logChannel.send({
+        content: `💻 **${interaction.user.username}** awarded **${points}** **${jobLabel}** point(s) to **${officerDisplay}** (${jobLabel}: ${result.next}, monthly: ${result.monthlyNext}, total jobs: ${result.totalJobs}). ${logLink}`,
+      });
+    } else {
+      await logChannel.send({
+        content: `↩️ **${interaction.user.username}** revoked **${points}** **${jobLabel}** point(s) from **${officerDisplay}** (${jobLabel}: ${result.next}, monthly: ${result.monthlyNext}, total jobs: ${result.totalJobs}). ${logLink}`,
+      });
+    }
+  } catch (err) {
+    console.warn("Could not post investigation points audit log:", err.message);
+  }
+}
+
+async function handleInvestigationPointsAwardButton(interaction) {
+  if (!interaction.guild) {
+    await replyEphemeral(interaction, "This only works in a server.");
+    return;
+  }
+
+  if (!(await memberHasAuthRole(interaction.guild, interaction.user.id))) {
+    await replyEphemeral(
+      interaction,
+      "Only members with the points authorization role can award investigation points."
+    );
+    return;
+  }
+
+  const mainEmbed = interaction.message.embeds[0];
+
+  if (mainEmbed && isInvestigationPointsClosedMessage(interaction.message)) {
+    await replyOrEditEphemeral(
+      interaction,
+      "This investigation is closed — **All points awarded**. No further points can be added."
+    );
+    return;
+  }
+
+  await interaction.showModal(buildInvestigationPointsModal());
+}
+
+async function handleInvestigationPointsModalSubmit(interaction) {
+  if (!interaction.guild) {
+    await interaction.editReply({ content: "This only works in a server." });
+    return;
+  }
+
+  if (!(await memberHasAuthRole(interaction.guild, interaction.user.id))) {
+    await interaction.editReply({
+      content: "You don't have permission to award investigation points.",
+    });
+    return;
+  }
+
+  const parsed = parseInvestigationPointsModalInput(
+    interaction.fields.getTextInputValue("officer"),
+    interaction.fields.getTextInputValue("points")
+  );
+
+  if (!parsed.ok) {
+    await interaction.editReply({ content: parsed.reason });
+    return;
+  }
+
+  const { officer, points } = parsed;
+  const logMessage = interaction.message;
+  const mainEmbed = logMessage.embeds[0];
+
+  if (!mainEmbed) {
+    await interaction.editReply({
+      content: "Could not read this investigation log.",
+    });
+    return;
+  }
+
+  if (isInvestigationPointsClosedMessage(logMessage)) {
+    await interaction.editReply({
+      content:
+        "This investigation is closed — **All points awarded**. No further points can be added.",
+    });
+    return;
+  }
+
+  await withMessageLock(logMessage.id, async () => {
+    const freshMessage = await logMessage.fetch();
+
+    if (isInvestigationPointsClosedMessage(freshMessage)) {
+      await interaction.editReply({
+        content:
+          "This investigation is closed — **All points awarded**. No further points can be added.",
+      });
+      return;
+    }
+
+    const result = await adjustOfficerPoints(
+      officer,
+      AWARD_JOB_TYPE_COLUMNS.investigation,
+      points
+    );
+    const jobLabel = POINTS_COLUMN_LABELS.H ?? "Investigation";
+
+    if (!result.ok) {
+      await interaction.editReply({
+        content:
+          result.reason === "officer-not-found"
+            ? `⚠️ **${sanitizeForDisplay(officer)}** was not found in the points sheet (column C). Check the name matches.`
+            : `Could not update points (${result.reason}).`,
+      });
+      return;
+    }
+
+    const awards = parseInvestigationAwardsFromMessage(freshMessage);
+    awards.push({ officer, points });
+
+    await freshMessage.edit(
+      buildInvestigationLogEditPayload(
+        freshMessage,
+        awards,
+        buildInvestigationPointsComponents(awards, false)
+      )
+    );
+
+    await interaction.editReply({
+      content: `✅ Awarded **${points}** ${jobLabel} point(s) to **${sanitizeForDisplay(officer)}**. ${jobLabel} total: **${result.next}** · Monthly jobs: **${result.monthlyNext}** · Total jobs: **${result.totalJobs}**.`,
+    });
+
+    await postInvestigationPointsAudit(interaction, {
+      officer,
+      points,
+      delta: points,
+      result,
+      logMessage,
+    });
+
+    console.log(
+      `Investigation points +${points} (H) for ${officer} → ${result.next} by ${interaction.user.tag}`
+    );
+  });
+}
+
+async function handleInvestigationPointsUndoButton(interaction) {
+  if (!interaction.guild) {
+    await interaction.editReply({ content: "This only works in a server." });
+    return;
+  }
+
+  if (!(await memberHasAuthRole(interaction.guild, interaction.user.id))) {
+    await interaction.editReply({
+      content: "You don't have permission to revoke investigation points.",
+    });
+    return;
+  }
+
+  const indexText = interaction.customId.slice(
+    INVESTIGATION_POINTS_UNDO_PREFIX.length
+  );
+  const index = Number.parseInt(indexText, 10);
+  const logMessage = interaction.message;
+  const mainEmbed = logMessage.embeds[0];
+
+  if (!mainEmbed || !Number.isFinite(index)) {
+    await interaction.editReply({
+      content: "Could not read this investigation log.",
+    });
+    return;
+  }
+
+  if (isInvestigationPointsClosedMessage(logMessage)) {
+    await interaction.editReply({
+      content:
+        "This investigation is closed — **All points awarded**. Awards cannot be changed.",
+    });
+    return;
+  }
+
+  await withMessageLock(logMessage.id, async () => {
+    const freshMessage = await logMessage.fetch();
+
+    if (isInvestigationPointsClosedMessage(freshMessage)) {
+      await interaction.editReply({
+        content:
+          "This investigation is closed — **All points awarded**. Awards cannot be changed.",
+      });
+      return;
+    }
+
+    const awards = parseInvestigationAwardsFromMessage(freshMessage);
+
+    if (index < 0 || index >= awards.length) {
+      await interaction.editReply({
+        content: "That award no longer exists — the log may have changed.",
+      });
+      return;
+    }
+
+    const [award] = awards.splice(index, 1);
+    const result = await adjustOfficerPoints(
+      award.officer,
+      AWARD_JOB_TYPE_COLUMNS.investigation,
+      -award.points
+    );
+    const jobLabel = POINTS_COLUMN_LABELS.H ?? "Investigation";
+
+    if (!result.ok) {
+      await interaction.editReply({
+        content:
+          result.reason === "officer-not-found"
+            ? `⚠️ **${sanitizeForDisplay(award.officer)}** was not found in the points sheet (column C).`
+            : `Could not update points (${result.reason}).`,
+      });
+      return;
+    }
+
+    await freshMessage.edit(
+      buildInvestigationLogEditPayload(
+        freshMessage,
+        awards,
+        buildInvestigationPointsComponents(awards, false)
+      )
+    );
+
+    await interaction.editReply({
+      content: `↩️ Revoked **${award.points}** ${jobLabel} point(s) from **${sanitizeForDisplay(award.officer)}**. ${jobLabel} total: **${result.next}** · Monthly jobs: **${result.monthlyNext}** · Total jobs: **${result.totalJobs}**.`,
+    });
+
+    await postInvestigationPointsAudit(interaction, {
+      officer: award.officer,
+      points: award.points,
+      delta: -award.points,
+      result,
+      logMessage,
+    });
+
+    console.log(
+      `Investigation points -${award.points} (H) for ${award.officer} → ${result.next} by ${interaction.user.tag}`
+    );
+  });
+}
+
+async function handleInvestigationPointsFinalizeButton(interaction) {
+  if (!interaction.guild) {
+    await interaction.editReply({ content: "This only works in a server." });
+    return;
+  }
+
+  if (!(await memberHasAuthRole(interaction.guild, interaction.user.id))) {
+    await interaction.editReply({
+      content: "You don't have permission to close investigation points.",
+    });
+    return;
+  }
+
+  const logMessage = interaction.message;
+  const mainEmbed = logMessage.embeds[0];
+
+  if (!mainEmbed) {
+    await interaction.editReply({
+      content: "Could not read this investigation log.",
+    });
+    return;
+  }
+
+  if (isInvestigationPointsClosedMessage(logMessage)) {
+    await interaction.editReply({
+      content: "This investigation is already marked **All points awarded**.",
+    });
+    return;
+  }
+
+  await withMessageLock(logMessage.id, async () => {
+    const freshMessage = await logMessage.fetch();
+
+    if (isInvestigationPointsClosedMessage(freshMessage)) {
+      await interaction.editReply({
+        content: "This investigation is already marked **All points awarded**.",
+      });
+      return;
+    }
+
+    const awards = parseInvestigationAwardsFromMessage(freshMessage);
+    const filedAt = splitDateAndTime(new Date());
+
+    await freshMessage.edit(
+      buildInvestigationLogEditPayload(
+        freshMessage,
+        awards,
+        buildInvestigationPointsComponents([], true),
+        {
+          by: interaction.user.username,
+          at: `${filedAt.date}, ${filedAt.time}`,
+        }
+      )
+    );
+
+    await interaction.editReply({
+      content:
+        "✅ Marked this investigation as **All points awarded**. No further points can be added or changed.",
+    });
+
+    console.log(
+      `Investigation points closed on message ${logMessage.id} by ${interaction.user.tag}`
+    );
+  });
+}
+
+async function handlePointsButton(interaction) {
   try {
     if (!interaction.guild) {
       await interaction.editReply({ content: "This only works in a server." });
@@ -1894,6 +2754,14 @@ async function handlePointsButton(interaction) {
     if (!column) {
       await interaction.editReply({
         content: "This log isn't tracked for points.",
+      });
+      return;
+    }
+
+    if (column === AWARD_JOB_TYPE_COLUMNS.investigation) {
+      await interaction.editReply({
+        content:
+          "Investigation logs use **Award investigation points** (custom amounts, multiple officers). This message still has the old **Authorize point** button — run **`/long investigation`** again to post a new log with the updated controls.",
       });
       return;
     }

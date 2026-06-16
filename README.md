@@ -19,29 +19,33 @@ Logs use structured **embed cards** (readable fields, evidence gallery, optional
 
 ## Commands
 
-| Command | Channel | Summary |
-|---------|---------|---------|
-| `/outstanding citation` | `#outstanding-citations` | File outstanding citation + evidence (up to 4 images, links) |
-| `/outstanding delete` | `#outstanding-citations` | Mark citation paid: payment screenshot, paid log in `#citations`, removes sheet/Discord outstanding row |
-| `/outstanding sentences` | `#outstanding-citation-sentences` | File sentence from outstanding citation + screenshot |
-| `/ce sentence` | `#class-e-sentences` | Class-E sentence + sheet tab routing by duration |
-| `/ce delete` | `#class-e-sentences` | Remove finished Class-E row from sheet |
-| `/cite` | `#citations` | Paid citation log directly (same style as delete output) |
-| `/spectator` | `#spectator` | Spectator log + screenshots |
-| `/interview` | `#interview` | Interview log (modal for Q&A) + screenshots |
-| `/seminar` | `#seminar` | Seminar log + screenshots |
+| Command | Thread | Summary |
+|---------|--------|---------|
+| `/outstanding citation` | Outstanding Citations | File outstanding citation + evidence (up to 4 images, links) |
+| `/outstanding delete` | Outstanding Citations | Mark citation paid: payment screenshot, paid log in Citations thread, removes sheet/Discord outstanding row |
+| `/outstanding sentences` | Outstanding Citation Sentences | File sentence from outstanding citation + screenshot |
+| `/ce sentence` | Class-E Sentences | Class-E sentence + sheet tab routing by duration |
+| `/ce delete` | Class-E Sentences | Remove finished Class-E row from sheet |
+| `/cite` | Citations | Paid citation log directly (same style as delete output) |
+| `/spectator` | Spectator | Spectator log + screenshots |
+| `/interview` | Interview | Interview log (modal for Q&A) + screenshots |
+| `/seminar` | Seminar | Seminar log + screenshots |
+| `/watchlist` | Watchlist | Watchlist entry (username, duration, reason) |
+| `/investigation` | Investigations | Post investigation doc link + verdict |
 | `/register` | Anywhere | Register officer username (required before other commands) |
 | `/registry stats` | Anywhere | Your points totals (monthly K + career E–J); auth role can pass `username` |
 | `/registry list` / `delete` | Anywhere | List or remove registrations |
 | `/help` | Anywhere | Command reference (public) |
 
-Wrong channel → private ephemeral error. Validation errors are ephemeral.
+Wrong thread → private ephemeral error. Validation errors are ephemeral.
+
+Log commands post to dedicated **forum threads** under the ethics log forum (see `src/channels.js`). Run each command inside its matching thread.
 
 ---
 
 ## Points (💻 button)
 
-- Appears on posted logs in point-tracked channels.
+- Appears on posted logs in point-tracked threads.
 - Only members with the configured auth role can authorize or undo.
 - **E–J** — Per job type (citation, interview, spectate, sentence, seminar).
 - **K** — **Monthly jobs** (all types combined); resets to **0** at the start of each calendar month.
@@ -84,13 +88,13 @@ Create a `.env` file in the project root (never commit it).
 | `GUILD_ID` | Server ID — register commands to one guild for instant updates while developing |
 | `POINTS_SPREADSHEET_ID` | Points spreadsheet (has a default in code if unset) |
 
-### Channel overrides (optional)
+### Thread overrides (optional)
 
-If channel IDs change, set any of:
+If forum or thread IDs change, set any of:
 
-`CITATIONS_CHANNEL_ID`, `OUTSTANDING_CITATIONS_CHANNEL_ID`, `OUTSTANDING_SENTENCES_CHANNEL_ID`, `CLASS_E_CHANNEL_ID`, `SPECTATOR_CHANNEL_ID`, `INTERVIEW_CHANNEL_ID`, `SEMINAR_CHANNEL_ID`, `POINTS_LOG_CHANNEL_ID`
+`LOG_FORUM_CHANNEL_ID`, `CITATIONS_THREAD_ID`, `OUTSTANDING_CITATIONS_THREAD_ID`, `OUTSTANDING_SENTENCES_THREAD_ID`, `CLASS_E_THREAD_ID`, `SPECTATOR_THREAD_ID`, `INTERVIEW_THREAD_ID`, `SEMINAR_THREAD_ID`, `INVESTIGATION_THREAD_ID`, `WATCHLIST_THREAD_ID`, `POINTS_LOG_CHANNEL_ID`
 
-Defaults are in `src/channels.js`.
+Legacy `*_CHANNEL_ID` env vars still work for log threads. Defaults are in `src/channels.js`.
 
 ### Optional tuning
 
@@ -165,7 +169,7 @@ Key source files:
 | `src/log-render.js` | Official embed log layout |
 | `src/points.js` | Point updates + monthly K reset |
 | `src/registry.js` | Officer registration |
-| `src/channels.js` | Channel IDs and command restrictions |
+| `src/channels.js` | Forum + thread IDs and command restrictions |
 | `UPDATE_LOG.md` | Recent feature notes for your team |
 
 ---

@@ -58,3 +58,22 @@ export const POINTS_COLUMN_LABELS = {
   I: "Sentence",
   J: "Seminar",
 };
+
+/** Slash-command choices for /award point → career column (E–J). */
+export const AWARD_JOB_TYPE_CHOICES = [
+  { name: "Citation", value: "citation" },
+  { name: "Interview", value: "interview" },
+  { name: "Spectate", value: "spectate" },
+  { name: "Investigation", value: "investigation" },
+  { name: "Sentence", value: "sentence" },
+  { name: "Seminar", value: "seminar" },
+];
+
+export const AWARD_JOB_TYPE_COLUMNS = {
+  citation: "E",
+  interview: "F",
+  spectate: "G",
+  investigation: "H",
+  sentence: "I",
+  seminar: "J",
+};

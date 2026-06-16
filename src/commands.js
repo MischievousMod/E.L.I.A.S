@@ -1,6 +1,7 @@
 import { SlashCommandBuilder } from "discord.js";
 import { citationDiscordFields, commandFields } from "./config.js";
 import { ceBannedChoices, ceRankChoices } from "./ce-config.js";
+import { AWARD_JOB_TYPE_CHOICES } from "./points-config.js";
 
 /**
  * Single source of truth for every slash command.
@@ -104,7 +105,7 @@ export function buildCommands() {
           opt
             .setName("username")
             .setDescription(
-              "Username — must match an outstanding citation in #outstanding-citations"
+              "Username — must match an outstanding citation in the Outstanding Citations thread"
             )
             .setRequired(true)
             .setMaxLength(500)
@@ -120,7 +121,7 @@ export function buildCommands() {
       sub
         .setName("delete")
         .setDescription(
-          "Remove an outstanding citation (sheet + Discord) and auto-generate a citation log in #citations"
+          "Mark citation paid — remove sheet/Discord row and post paid log to Citations"
         )
         .addStringOption((opt) =>
           opt
@@ -262,7 +263,7 @@ export function buildCommands() {
 
   const spectator = new SlashCommandBuilder()
     .setName("spectator")
-    .setDescription("File a spectator log (posted to #spectator)")
+    .setDescription("File a spectator log (posted to the Spectator thread)")
     .addStringOption((opt) =>
       opt
         .setName("username")
@@ -312,7 +313,7 @@ export function buildCommands() {
   const interview = new SlashCommandBuilder()
     .setName("interview")
     .setDescription(
-      "File an interview log — opens a form for the questions/answers (posted to #interview)"
+      "File an interview log — opens a form for the questions/answers (posted to the Interview thread)"
     )
     .addAttachmentOption((opt) =>
       opt
@@ -341,7 +342,7 @@ export function buildCommands() {
 
   const seminar = new SlashCommandBuilder()
     .setName("seminar")
-    .setDescription("File a seminar log (posted to #seminar)")
+    .setDescription("File a seminar log (posted to the Seminar thread)")
     .addStringOption((opt) =>
       opt
         .setName("username")
@@ -388,10 +389,130 @@ export function buildCommands() {
         .setRequired(false)
     );
 
+  const watchlist = new SlashCommandBuilder()
+    .setName("watchlist")
+    .setDescription("File a watchlist entry (posted to the Watchlist thread)")
+    .addStringOption((opt) =>
+      opt
+        .setName("username")
+        .setDescription("Username")
+        .setRequired(true)
+        .setMaxLength(500)
+    )
+    .addStringOption((opt) =>
+      opt
+        .setName("duration")
+        .setDescription("Watchlist duration (e.g. 2 weeks, 30 days)")
+        .setRequired(true)
+        .setMaxLength(200)
+    )
+    .addStringOption((opt) =>
+      opt
+        .setName("reason")
+        .setDescription("Reason for watchlist")
+        .setRequired(true)
+        .setMaxLength(1000)
+    )
+    .addStringOption((opt) =>
+      opt
+        .setName("evidence_link")
+        .setDescription("Optional evidence link(s) — separate multiple URLs with spaces")
+        .setRequired(false)
+        .setMaxLength(1000)
+    )
+    .addAttachmentOption((opt) =>
+      opt
+        .setName("evidence_file")
+        .setDescription("Optional evidence image")
+        .setRequired(false)
+    )
+    .addAttachmentOption((opt) =>
+      opt
+        .setName("evidence_file_2")
+        .setDescription("Optional second evidence image")
+        .setRequired(false)
+    );
+
+  const longInvestigation = new SlashCommandBuilder()
+    .setName("long")
+    .setDescription(
+      "Long-form investigation logs (Google Doc + custom point awards)"
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("investigation")
+        .setDescription(
+          "File a long investigation from a Google Doc (Investigations thread)"
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("username")
+            .setDescription("Username of the person being investigated")
+            .setRequired(true)
+            .setMaxLength(500)
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("document_link")
+            .setDescription("Link to the investigation Google Doc")
+            .setRequired(true)
+            .setMaxLength(1000)
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("verdict")
+            .setDescription("Investigation verdict")
+            .setRequired(true)
+            .addChoices(
+              { name: "Guilty", value: "Guilty" },
+              { name: "Not Guilty", value: "Not Guilty" }
+            )
+        )
+    );
+
+  const investigation = new SlashCommandBuilder()
+    .setName("investigation")
+    .setDescription(
+      "File a short investigation log (form + evidence, Investigations thread)"
+    )
+    .addStringOption((opt) =>
+      opt
+        .setName("evidence_link")
+        .setDescription(
+          "Optional evidence link(s) — separate multiple URLs with spaces"
+        )
+        .setRequired(false)
+        .setMaxLength(1000)
+    )
+    .addAttachmentOption((opt) =>
+      opt
+        .setName("evidence_file")
+        .setDescription("Optional evidence image or video")
+        .setRequired(false)
+    )
+    .addAttachmentOption((opt) =>
+      opt
+        .setName("evidence_file_2")
+        .setDescription("Optional second evidence file")
+        .setRequired(false)
+    )
+    .addAttachmentOption((opt) =>
+      opt
+        .setName("evidence_file_3")
+        .setDescription("Optional third evidence file")
+        .setRequired(false)
+    )
+    .addAttachmentOption((opt) =>
+      opt
+        .setName("evidence_file_4")
+        .setDescription("Optional fourth evidence file")
+        .setRequired(false)
+    );
+
   const cite = new SlashCommandBuilder()
     .setName("cite")
     .setDescription(
-      "File a paid citation log in #citations (same format as a paid outstanding citation)"
+      "File a paid citation log in the Citations thread (same format as a paid outstanding citation)"
     )
     .addStringOption((opt) =>
       opt
@@ -461,6 +582,37 @@ export function buildCommands() {
       "Register your officer username for logs (opens a form — run again to update)"
     );
 
+  const award = new SlashCommandBuilder()
+    .setName("award")
+    .setDescription("Award job points on the points sheet (auth role only)")
+    .addSubcommand((sub) =>
+      sub
+        .setName("point")
+        .setDescription("Add career and monthly job points for an officer")
+        .addStringOption((opt) =>
+          opt
+            .setName("username")
+            .setDescription("Officer username (must match column C on points sheet)")
+            .setRequired(true)
+            .setMaxLength(500)
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("job_type")
+            .setDescription("Job type to credit")
+            .setRequired(true)
+            .addChoices(...AWARD_JOB_TYPE_CHOICES)
+        )
+        .addIntegerOption((opt) =>
+          opt
+            .setName("points")
+            .setDescription("How many points to add")
+            .setRequired(true)
+            .setMinValue(1)
+            .setMaxValue(999)
+        )
+    );
+
   const registry = new SlashCommandBuilder()
     .setName("registry")
     .setDescription("View or manage the officer registry")
@@ -509,8 +661,12 @@ export function buildCommands() {
     spectator,
     interview,
     seminar,
+    watchlist,
+    longInvestigation,
+    investigation,
     cite,
     register,
+    award,
     registry,
     help,
   ];
