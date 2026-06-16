@@ -13,6 +13,12 @@ export const POINTS_TAB = "Ethics Committee";
 /** Column holding the ROBLOX/Discord name used to match the officer on a slip. */
 export const POINTS_OFFICER_COLUMN = "C";
 
+/** First row with officer names (row 5 on the sheet is the column header row). */
+export const POINTS_FIRST_DATA_ROW = Math.max(
+  2,
+  Number.parseInt(process.env.POINTS_FIRST_DATA_ROW ?? "6", 10) || 6
+);
+
 /** Only members with this role may authorize a point via the button. */
 export const POINTS_AUTH_ROLE_ID = "1511867275945181325";
 

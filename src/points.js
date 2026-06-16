@@ -3,6 +3,7 @@ import { extractExecutorFromMessage } from "./citation-log.js";
 import { normalizeOfficerKey } from "./format.js";
 import {
   POINTS_CAREER_COLUMNS,
+  POINTS_FIRST_DATA_ROW,
   POINTS_MONTHLY_JOBS_COLUMN,
   POINTS_OFFICER_COLUMN,
   POINTS_RESET_TIMEZONE,
@@ -45,6 +46,27 @@ export function parseOfficerFromMessage(message) {
 
 function normalizeOfficerName(name) {
   return normalizeOfficerKey(name);
+}
+
+const POINTS_HEADER_LABELS = new Set([
+  "officer",
+  "username",
+  "user name",
+  "name",
+  "member",
+  "roblox username",
+]);
+
+function isOfficerDataRow(name) {
+  const trimmed = String(name ?? "").trim();
+
+  if (!trimmed) {
+    return false;
+  }
+
+  const key = normalizeOfficerName(trimmed);
+
+  return Boolean(key) && !POINTS_HEADER_LABELS.has(key);
 }
 
 /** Match an officer name against column C (case-insensitive, collapses whitespace). */
@@ -131,30 +153,43 @@ async function readOfficerTotalJobs(sheets, row) {
   return sum;
 }
 
-/** Set column K to 0 for every officer row (row 2+). */
+/** Set column K to 0 for every officer row (skips the header row on row 5). */
 export async function resetMonthlyJobsColumn() {
   const sheets = getSheets();
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: POINTS_SPREADSHEET_ID,
-    range: a1(`${POINTS_OFFICER_COLUMN}2:${POINTS_OFFICER_COLUMN}`),
+    range: a1(
+      `${POINTS_OFFICER_COLUMN}${POINTS_FIRST_DATA_ROW}:${POINTS_OFFICER_COLUMN}`
+    ),
   });
 
   const rows = res.data.values ?? [];
+  const dataRows = [];
 
-  if (!rows.length) {
+  for (let i = 0; i < rows.length; i += 1) {
+    if (!isOfficerDataRow(rows[i]?.[0])) {
+      continue;
+    }
+
+    dataRows.push(POINTS_FIRST_DATA_ROW + i);
+  }
+
+  if (!dataRows.length) {
     return { cleared: 0 };
   }
 
-  const zeros = rows.map(() => [0]);
-
-  await sheets.spreadsheets.values.update({
+  await sheets.spreadsheets.values.batchUpdate({
     spreadsheetId: POINTS_SPREADSHEET_ID,
-    range: a1(`K2:K${rows.length + 1}`),
-    valueInputOption: "USER_ENTERED",
-    requestBody: { values: zeros },
+    requestBody: {
+      valueInputOption: "USER_ENTERED",
+      data: dataRows.map((row) => ({
+        range: a1(`${POINTS_MONTHLY_JOBS_COLUMN}${row}`),
+        values: [[0]],
+      })),
+    },
   });
 
-  return { cleared: rows.length };
+  return { cleared: dataRows.length };
 }
 
 /**
@@ -167,6 +202,15 @@ export async function ensureMonthlyJobsResetIfNeeded() {
 
   if (stored === monthKey) {
     return { reset: false, monthKey };
+  }
+
+  // Lost or first-run state file: adopt this month without wiping K (sheet may already have June totals).
+  if (!stored) {
+    setStoredMonthKey(monthKey);
+    console.log(
+      `Monthly jobs state initialized for ${monthKey} (${POINTS_RESET_TIMEZONE}); column K left unchanged.`
+    );
+    return { reset: false, monthKey, initialized: true };
   }
 
   const { cleared } = await resetMonthlyJobsColumn();
