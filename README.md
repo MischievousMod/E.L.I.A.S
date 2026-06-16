@@ -110,7 +110,7 @@ Defaults are in `src/channels.js`.
 **PowerShell** may block `npm` — use `npm.cmd`, the `.bat` files, or **Command Prompt**.
 
 ```powershell
-cd C:\Users\Jordan\Documents\discord-sheets-bot
+cd path\to\discord-sheets-bot
 npm.cmd install
 ```
 
