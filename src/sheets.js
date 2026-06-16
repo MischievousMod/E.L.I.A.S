@@ -102,6 +102,20 @@ function normalizeUsername(value) {
   return normalizeOfficerKey(value);
 }
 
+/** First row for outstanding citation data (row 3 = headers, row 4 = separator). */
+const OUTSTANDING_FIRST_DATA_ROW = Math.max(
+  2,
+  Number.parseInt(process.env.OUTSTANDING_FIRST_DATA_ROW ?? "5", 10) || 5
+);
+
+const OUTSTANDING_OFFENDER_HEADER_ALIASES = [
+  "username",
+  "offender",
+  "user name",
+  "name",
+  "member",
+];
+
 const CE_SKIP_SCAN_VALUES = new Set([
   ...ceOffenderHeaderAliases,
   "codes broken",
@@ -309,13 +323,38 @@ function buildDefaultHeaderRow() {
   return row;
 }
 
-async function readHeaderRow(sheets, spreadsheetId, sheetName) {
+async function readOutstandingSheetGrid(sheets, spreadsheetId, sheetName) {
   const { data } = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: range(sheetName, "1:1"),
+    range: range(sheetName, `A1:${lastDataColumn}12`),
   });
 
-  return data.values?.[0] ?? [];
+  return data.values ?? [];
+}
+
+function findOutstandingHeaderRowIndex(grid) {
+  for (let row = 0; row < grid.length; row += 1) {
+    const cells = grid[row] ?? [];
+
+    for (const cell of cells) {
+      const normalized = normalizeHeader(cell);
+
+      if (OUTSTANDING_OFFENDER_HEADER_ALIASES.includes(normalized)) {
+        return row;
+      }
+    }
+  }
+
+  return -1;
+}
+
+function computeOutstandingFirstDataRow(headerRowIndex) {
+  if (headerRowIndex >= 0) {
+    // One separator row between column headers and data (e.g. headers row 3, data row 5).
+    return headerRowIndex + 3;
+  }
+
+  return OUTSTANDING_FIRST_DATA_ROW;
 }
 
 function buildSheetLayout(headerRow) {
@@ -351,8 +390,13 @@ function buildSheetLayout(headerRow) {
 }
 
 async function getSheetLayout(sheets, spreadsheetId, sheetName) {
-  const headerRow = await readHeaderRow(sheets, spreadsheetId, sheetName);
-  return buildSheetLayout(headerRow);
+  const grid = await readOutstandingSheetGrid(sheets, spreadsheetId, sheetName);
+  const headerRowIndex = findOutstandingHeaderRowIndex(grid);
+  const headerRow =
+    headerRowIndex >= 0 ? (grid[headerRowIndex] ?? []) : (grid[0] ?? []);
+  const layout = buildSheetLayout(headerRow);
+  layout.firstDataRow = computeOutstandingFirstDataRow(headerRowIndex);
+  return layout;
 }
 
 function fieldUpdatesForRow(sheetName, layout, rowNumber, fieldValues) {
@@ -381,10 +425,14 @@ function fieldUpdatesForRow(sheetName, layout, rowNumber, fieldValues) {
 /** First data row with no offender in the column mapped from the sheet headers. */
 async function getNextRowNumber(sheets, spreadsheetId, sheetName, layout) {
   const offenderColumn = indexToColumn(layout.offenderColIndex);
+  const firstDataRow = layout.firstDataRow ?? OUTSTANDING_FIRST_DATA_ROW;
 
   const { data } = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: range(sheetName, `${offenderColumn}2:${offenderColumn}`),
+    range: range(
+      sheetName,
+      `${offenderColumn}${firstDataRow}:${offenderColumn}`
+    ),
   });
 
   const rows = data.values ?? [];
@@ -392,11 +440,11 @@ async function getNextRowNumber(sheets, spreadsheetId, sheetName, layout) {
   for (let i = 0; i < rows.length; i++) {
     const offender = rows[i]?.[0];
     if (!String(offender ?? "").trim()) {
-      return i + 2;
+      return i + firstDataRow;
     }
   }
 
-  return rows.length + 2;
+  return rows.length + firstDataRow;
 }
 
 async function ensureHeaders(sheets, spreadsheetId, sheetName) {
@@ -489,9 +537,14 @@ export async function findAllCitationsByOffender(sheetName, username) {
     return matches;
   }
 
+  const firstDataRow = layout.firstDataRow ?? OUTSTANDING_FIRST_DATA_ROW;
+
   const { data } = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: range(sheetName, `${offenderColumn}2:${offenderColumn}`),
+    range: range(
+      sheetName,
+      `${offenderColumn}${firstDataRow}:${offenderColumn}`
+    ),
   });
 
   const rows = data.values ?? [];
@@ -503,7 +556,7 @@ export async function findAllCitationsByOffender(sheetName, username) {
       continue;
     }
 
-    const rowNumber = i + 2;
+    const rowNumber = i + firstDataRow;
     const endColumn = indexToColumn(layout.lastColIndex);
     /** FORMULA render so a HYPERLINK("url","link") cell still exposes its URL. */
     const { data: rowData } = await sheets.spreadsheets.values.get({
