@@ -108,13 +108,16 @@ const OUTSTANDING_FIRST_DATA_ROW = Math.max(
   Number.parseInt(process.env.OUTSTANDING_FIRST_DATA_ROW ?? "5", 10) || 5
 );
 
-const OUTSTANDING_OFFENDER_HEADER_ALIASES = [
-  "username",
-  "offender",
-  "user name",
-  "name",
-  "member",
-];
+/** Rows between column headers and the first data row (e.g. one black separator row). */
+const OUTSTANDING_HEADER_SEPARATOR_ROWS = Math.max(
+  0,
+  Number.parseInt(process.env.OUTSTANDING_HEADER_SEPARATOR_ROWS ?? "1", 10) || 1
+);
+
+function offenderHeaderAliases() {
+  const offenderField = fieldDefinitions.find((field) => field.name === "offender");
+  return offenderField ? headerNamesForField(offenderField) : ["username", "offender"];
+}
 
 const CE_SKIP_SCAN_VALUES = new Set([
   ...ceOffenderHeaderAliases,
@@ -333,25 +336,46 @@ async function readOutstandingSheetGrid(sheets, spreadsheetId, sheetName) {
 }
 
 function findOutstandingHeaderRowIndex(grid) {
+  const offenderColIndex = columnToIndex("B");
+  const offenderAliases = offenderHeaderAliases();
+
   for (let row = 0; row < grid.length; row += 1) {
-    const cells = grid[row] ?? [];
+    const cell = normalizeHeader(grid[row]?.[offenderColIndex]);
 
-    for (const cell of cells) {
-      const normalized = normalizeHeader(cell);
-
-      if (OUTSTANDING_OFFENDER_HEADER_ALIASES.includes(normalized)) {
-        return row;
-      }
+    if (offenderAliases.includes(cell)) {
+      return row;
     }
   }
 
-  return -1;
+  let bestRow = -1;
+  let bestScore = 0;
+
+  for (let row = 0; row < grid.length; row += 1) {
+    const normalized = (grid[row] ?? []).map(normalizeHeader);
+    let score = 0;
+
+    for (const field of fieldDefinitions) {
+      const names = headerNamesForField(field);
+
+      if (names.some((name) => normalized.includes(name))) {
+        score += 1;
+      }
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestRow = row;
+    }
+  }
+
+  return bestScore >= 2 ? bestRow : -1;
 }
 
 function computeOutstandingFirstDataRow(headerRowIndex) {
   if (headerRowIndex >= 0) {
-    // One separator row between column headers and data (e.g. headers row 3, data row 5).
-    return headerRowIndex + 3;
+    const computed =
+      headerRowIndex + 1 + OUTSTANDING_HEADER_SEPARATOR_ROWS + 1;
+    return Math.max(computed, OUTSTANDING_FIRST_DATA_ROW);
   }
 
   return OUTSTANDING_FIRST_DATA_ROW;
@@ -395,6 +419,7 @@ async function getSheetLayout(sheets, spreadsheetId, sheetName) {
   const headerRow =
     headerRowIndex >= 0 ? (grid[headerRowIndex] ?? []) : (grid[0] ?? []);
   const layout = buildSheetLayout(headerRow);
+  layout.headerRowNumber = headerRowIndex >= 0 ? headerRowIndex + 1 : null;
   layout.firstDataRow = computeOutstandingFirstDataRow(headerRowIndex);
   return layout;
 }
@@ -498,6 +523,10 @@ export async function appendSubmission(sheetName, fieldValues) {
       },
     });
   }
+
+  console.log(
+    `Outstanding citation appended to row ${nextRow} (header row ${layout.headerRowNumber ?? "unknown"}, first data row ${layout.firstDataRow})`
+  );
 
   return nextRow;
 }
